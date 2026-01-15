@@ -26,6 +26,60 @@ logger = logging.getLogger(__name__)
 REVIS_DIR = Path(".revis")
 STOP_SIGNAL_FILE = REVIS_DIR / "stop_signal"
 
+# Common ML API keys that are auto-passed if set in environment
+COMMON_ML_ENV_VARS = [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "WANDB_API_KEY",
+    "HF_TOKEN",
+    "HUGGINGFACE_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+]
+
+
+def collect_training_env(config: RevisConfig, project_root: Path) -> dict[str, str]:
+    """Collect environment variables for training.
+
+    Order of precedence (later wins):
+    1. Auto-pass common ML keys from current env
+    2. Load .env if it exists in project root
+    3. Explicit env from config
+    4. Explicit env_passthrough from config
+    """
+    env = {}
+
+    # 1. Auto-pass common ML keys if set
+    for key in COMMON_ML_ENV_VARS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+
+    # 2. Load .env if exists
+    dotenv_path = project_root / ".env"
+    if dotenv_path.exists():
+        try:
+            for line in dotenv_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip("'\"")
+                    if key:
+                        env[key] = value
+        except Exception as e:
+            logger.warning(f"Failed to load .env: {e}")
+
+    # 3. Add explicit env vars from config
+    env.update(config.entry.env)
+
+    # 4. Add passthrough vars from current environment
+    for var_name in config.entry.env_passthrough:
+        if var_name in os.environ:
+            env[var_name] = os.environ[var_name]
+
+    return env
+
 
 class RevisLoop:
     """Main Revis orchestration loop."""
@@ -107,6 +161,7 @@ class RevisLoop:
             return self._terminate(session, TerminationReason.USER_STOP, base_branch)
         except Exception as e:
             logger.error(f"Loop failed with error: {e}")
+            self._terminate(session, TerminationReason.ERROR, base_branch)
             raise
         finally:
             self.executor.close()
@@ -163,12 +218,15 @@ class RevisLoop:
             session_name = f"revis-{session.id}"
             train_cmd = self.config.entry.train
 
-            # Inject Revis environment variables
-            run_env = {
+            # Build environment variables for training
+            run_env = collect_training_env(self.config, self.repo_path)
+
+            # Add Revis-specific env vars (these take precedence)
+            run_env.update({
                 "REVIS_OUTPUT_DIR": run_output_dir,
                 "REVIS_RUN_ID": run_id,
                 "REVIS_SESSION_ID": session.id,
-            }
+            })
 
             # Redirect output to log file in run output dir
             # Use pipefail so exit code reflects training failure, not tee success
@@ -469,6 +527,7 @@ class RevisLoop:
             return self._terminate(session, TerminationReason.USER_STOP, base_branch)
         except Exception as e:
             logger.error(f"Loop failed with error: {e}")
+            self._terminate(session, TerminationReason.ERROR, base_branch)
             raise
         finally:
             self.executor.close()

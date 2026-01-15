@@ -39,6 +39,8 @@ class EntryConfig(BaseModel):
 
     train: str
     eval: str | None = None  # Optional separate eval command
+    env: dict[str, str] = {}  # Additional env vars to set
+    env_passthrough: list[str] = []  # Env var names to pass from current environment
 
 
 class MetricsConfig(BaseModel):
@@ -173,6 +175,10 @@ executor:
 entry:
   train: "python train.py"
   # eval: "python eval.py"  # Optional separate eval command
+  #
+  # Environment: Common ML keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, WANDB_API_KEY,
+  # HF_TOKEN, etc.) are auto-passed from your shell. A .env file in the project
+  # root is also loaded if it exists. For custom vars, use env_passthrough.
   #
   # Revis sets REVIS_OUTPUT_DIR env var when running your script.
   # Write eval.json and any artifacts there:
