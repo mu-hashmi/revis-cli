@@ -1,0 +1,549 @@
+"""Main orchestration loop for Revis."""
+
+import json
+import logging
+import os
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from revis.analyzer.compare import RunAnalyzer
+from revis.analyzer.detectors import GuardrailChecker
+from revis.config import RevisConfig, parse_duration
+from revis.evaluator.harness import EvalHarness
+from revis.executor.base import Executor
+from revis.executor.local import LocalConfig, LocalExecutor
+from revis.executor.ssh import SSHConfig, SSHExecutor
+from revis.github.pr import GitConfig, GitHubManager, GitManager, format_pr_body
+from revis.llm.actions import apply_action, parse_action, validate_action
+from revis.llm.client import LLMClient
+from revis.llm.prompts import build_fix_prompt, build_prompt
+from revis.store.sqlite import SQLiteRunStore
+from revis.types import Budget, Decision, Session, TerminationReason
+
+logger = logging.getLogger(__name__)
+
+REVIS_DIR = Path(".revis")
+STOP_SIGNAL_FILE = REVIS_DIR / "stop_signal"
+
+
+class RevisLoop:
+    """Main Revis orchestration loop."""
+
+    def __init__(
+        self,
+        config: RevisConfig,
+        store: SQLiteRunStore,
+        repo_path: Path,
+    ):
+        self.config = config
+        self.store = store
+        self.repo_path = repo_path
+
+        # Initialize executor based on type
+        if config.executor.type == "local":
+            self.executor: Executor = LocalExecutor(LocalConfig(
+                work_dir=config.executor.work_dir,
+            ))
+        else:
+            self.executor = SSHExecutor(SSHConfig(
+                host=config.executor.host,
+                user=config.executor.user,
+                port=config.executor.port,
+                key_path=config.executor.key_path,
+                work_dir=config.executor.work_dir,
+            ))
+
+        self.llm = LLMClient(config.llm)
+        self.git = GitManager(GitConfig(repo_path=repo_path))
+        self.evaluator = EvalHarness(self.executor)
+        self.analyzer = RunAnalyzer(
+            store=store,
+            primary_metric=config.metrics.primary,
+            minimize=config.metrics.minimize,
+        )
+        self.guardrails = GuardrailChecker(config.guardrails)
+
+        # GitHub manager (optional - only if GITHUB_TOKEN set)
+        try:
+            self.github = GitHubManager()
+        except ValueError:
+            self.github = None
+            logger.warning("GITHUB_TOKEN not set - PR creation disabled")
+
+    def run(
+        self,
+        budget: Budget,
+        baseline_run_id: str | None = None,
+    ) -> Session:
+        """Run the main loop."""
+        # Clear any stale stop signal
+        if STOP_SIGNAL_FILE.exists():
+            STOP_SIGNAL_FILE.unlink()
+
+        # Create session
+        base_sha = self.git.get_head_sha()
+        base_branch = self.git.get_current_branch()
+        session_id = self.store.create_session(
+            branch=f"revis/session-{base_sha[:8]}",
+            base_sha=base_sha,
+            budget=budget,
+            baseline_run_id=baseline_run_id,
+        )
+
+        session = self.store.get_session(session_id)
+        logger.info(f"Started session {session_id} on branch {session.branch}")
+
+        # Create working branch
+        if not self.git.branch_exists(session.branch):
+            self.git.create_branch(session.branch)
+        else:
+            self.git.checkout(session.branch)
+
+        # Track start time for time-based budget
+        start_time = time.time()
+
+        try:
+            return self._run_loop(session, budget, start_time, base_branch)
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+            return self._terminate(session, TerminationReason.USER_STOP, base_branch)
+        except Exception as e:
+            logger.error(f"Loop failed with error: {e}")
+            raise
+        finally:
+            self.executor.close()
+
+    def _run_loop(
+        self,
+        session: Session,
+        budget: Budget,
+        start_time: float,
+        base_branch: str,
+    ) -> Session:
+        """Inner loop logic."""
+        iteration = session.iteration_count
+        last_action_str = ""
+
+        while True:
+            # Check stop signal
+            if STOP_SIGNAL_FILE.exists():
+                logger.info("Stop signal received")
+                STOP_SIGNAL_FILE.unlink()
+                return self._terminate(session, TerminationReason.USER_STOP, base_branch)
+
+            # Check budget
+            if budget.type == "time":
+                elapsed = int(time.time() - start_time)
+                self.store.update_session_budget(session.id, elapsed)
+                if elapsed >= budget.value:
+                    logger.info("Time budget exhausted")
+                    return self._terminate(session, TerminationReason.BUDGET_EXHAUSTED, base_branch)
+            elif budget.type == "runs":
+                if iteration >= budget.value:
+                    logger.info("Run budget exhausted")
+                    return self._terminate(session, TerminationReason.BUDGET_EXHAUSTED, base_branch)
+
+            iteration += 1
+            self.store.increment_iteration(session.id)
+            logger.info(f"Starting iteration {iteration}")
+
+            # Sync code to remote
+            logger.info("Syncing code to remote...")
+            self.executor.sync_code(self.repo_path, self.config.executor.work_dir)
+
+            # Create run record
+            run_id = self.store.create_run(
+                session_id=session.id,
+                config_json=json.dumps({"iteration": iteration}),
+                iteration=iteration,
+            )
+
+            # Set up run output directory
+            run_output_dir = f".revis/runs/{run_id}"
+
+            # Launch training with Revis environment variables
+            session_name = f"revis-{session.id}"
+            train_cmd = self.config.entry.train
+
+            # Inject Revis environment variables
+            run_env = {
+                "REVIS_OUTPUT_DIR": run_output_dir,
+                "REVIS_RUN_ID": run_id,
+                "REVIS_SESSION_ID": session.id,
+            }
+
+            # Redirect output to log file in run output dir
+            train_cmd = f"mkdir -p {run_output_dir} && {train_cmd} 2>&1 | tee {run_output_dir}/train.log"
+
+            logger.info(f"Launching training: {train_cmd}")
+            logger.info(f"Run output dir: {run_output_dir}")
+            run_start = time.time()
+
+            try:
+                self.executor.launch(train_cmd, run_env, session_name)
+
+                # Wait for completion
+                max_duration = parse_duration(self.config.guardrails.max_run_duration)
+                result = self.executor.wait(session_name, timeout=max_duration)
+
+                self.store.set_run_exit_code(run_id, result.exit_code)
+
+            except Exception as e:
+                logger.error(f"Training failed: {e}")
+                self.store.set_run_status(run_id, "failed")
+
+                # Decrement retry budget
+                session = self.store.get_session(session.id)
+                new_retry = session.retry_budget - 1
+                self.store.update_session_retry_budget(session.id, new_retry)
+
+                if new_retry <= 0:
+                    return self._terminate(session, TerminationReason.RETRY_EXHAUSTION, base_branch)
+
+                # Try to get LLM to fix
+                error_msg = str(e)
+                if last_action_str:
+                    messages = build_fix_prompt(error_msg, last_action_str, self.config, self.repo_path)
+                    response = self.llm.complete(messages)
+                    self.store.update_session_cost(session.id, self.llm.total_cost)
+
+                    action = parse_action(response.content)
+                    if action.type != "escalate" and action.edits:
+                        valid, err = validate_action(action, self.config.action_bounds)
+                        if valid:
+                            success, _ = apply_action(action, self.repo_path)
+                            if success:
+                                sha = self.git.commit(f"Revis fix: {action.rationale}")
+                                self.git.push(session.branch)
+                continue
+
+            # Handle run failure
+            if result.failed:
+                logger.warning(f"Run failed with exit code {result.exit_code}")
+                self.store.set_run_status(run_id, "failed")
+
+                session = self.store.get_session(session.id)
+                new_retry = session.retry_budget - 1
+                self.store.update_session_retry_budget(session.id, new_retry)
+
+                if new_retry <= 0:
+                    return self._terminate(session, TerminationReason.RETRY_EXHAUSTION, base_branch)
+
+                # Get error from logs and ask LLM to fix
+                log_tail = self.executor.get_log_tail(
+                    f"{run_output_dir}/train.log",
+                    self.config.context.log_tail_lines,
+                )
+                error_msg = f"Training failed with exit code {result.exit_code}\n\nLog tail:\n{log_tail}"
+
+                if last_action_str:
+                    messages = build_fix_prompt(error_msg, last_action_str, self.config, self.repo_path)
+                    response = self.llm.complete(messages)
+                    self.store.update_session_cost(session.id, self.llm.total_cost)
+
+                    action = parse_action(response.content)
+                    last_action_str = response.content
+
+                    if action.type == "escalate":
+                        return self._terminate(session, TerminationReason.LLM_ESCALATION, base_branch)
+
+                    if action.edits:
+                        valid, err = validate_action(action, self.config.action_bounds)
+                        if valid:
+                            success, apply_err = apply_action(action, self.repo_path)
+                            if success:
+                                sha = self.git.commit(f"Revis fix: {action.rationale}")
+                                self.git.push(session.branch)
+                                self.store.attach_decision(run_id, Decision(
+                                    action_type="code_patch",
+                                    rationale=action.rationale,
+                                    commit_sha=sha,
+                                ))
+                continue
+
+            self.store.set_run_status(run_id, "completed")
+
+            # Collect eval results from run output directory
+            eval_path = f"{run_output_dir}/eval.json"
+            logger.info(f"Collecting evaluation results from {eval_path}...")
+            try:
+                eval_result = self.evaluator.collect(eval_path)
+            except FileNotFoundError:
+                logger.error(f"eval.json not found at {eval_path}")
+                self.store.set_run_status(run_id, "failed")
+
+                session = self.store.get_session(session.id)
+                new_retry = session.retry_budget - 1
+                self.store.update_session_retry_budget(session.id, new_retry)
+
+                if new_retry <= 0:
+                    return self._terminate(session, TerminationReason.RETRY_EXHAUSTION, base_branch)
+                continue
+
+            # Log metrics
+            self.store.log_metrics(run_id, eval_result.metrics)
+            primary_value = eval_result.metrics.get(self.config.metrics.primary)
+            logger.info(f"Metrics: {self.config.metrics.primary}={primary_value}")
+
+            # Check target achievement
+            if self.config.metrics.target is not None and primary_value is not None:
+                if self.config.metrics.minimize:
+                    achieved = primary_value <= self.config.metrics.target
+                else:
+                    achieved = primary_value >= self.config.metrics.target
+
+                if achieved:
+                    logger.info(f"Target achieved: {primary_value} vs {self.config.metrics.target}")
+                    return self._terminate(session, TerminationReason.TARGET_ACHIEVED, base_branch)
+
+            # Run guardrails
+            metric_history = self.analyzer.get_metric_history(session.id)
+            initial_value = metric_history[0] if metric_history else None
+
+            guardrail_results = self.guardrails.check_eval_result(
+                eval_result=eval_result,
+                primary_metric=self.config.metrics.primary,
+                initial_value=initial_value,
+                metric_history=metric_history,
+                minimize=self.config.metrics.minimize,
+            )
+
+            # Check for critical violations
+            if self.guardrails.has_critical_violation(guardrail_results):
+                violations = self.guardrails.get_violations(guardrail_results)
+                logger.warning(f"Critical guardrail violations: {[v.message for v in violations]}")
+                # Don't terminate on guardrails - let LLM try to fix
+
+            # Check plateau
+            for result in guardrail_results:
+                if result.guardrail == "plateau_detection" and result.triggered:
+                    logger.info("Plateau detected")
+                    return self._terminate(session, TerminationReason.PLATEAU, base_branch)
+
+            # Get previous eval for comparison
+            prev_runs = self.store.query_runs(session_id=session.id, limit=2)
+            prev_eval = None
+            if len(prev_runs) > 1:
+                prev_metrics = self.store.get_run_metrics(prev_runs[1].id)
+                if prev_metrics:
+                    prev_eval_dict = {m.name: m.value for m in prev_metrics}
+                    from revis.types import EvalResult
+                    prev_eval = EvalResult(metrics=prev_eval_dict)
+
+            # Analyze run
+            analysis = self.analyzer.analyze_run(session, eval_result, prev_eval)
+
+            # Get run summaries for context
+            run_summaries = self.analyzer.summarize_runs_for_context(session.id, self.config.context.history)
+
+            # Get baseline value
+            baseline_value = initial_value
+
+            # Get log tail from run output directory
+            log_tail = self.executor.get_log_tail(
+                f"{run_output_dir}/train.log",
+                self.config.context.log_tail_lines,
+            )
+
+            # Build prompt and get LLM response
+            logger.info("Generating next action with LLM...")
+            messages = build_prompt(
+                config=self.config,
+                repo_root=self.repo_path,
+                run_summaries=run_summaries,
+                eval_result=eval_result,
+                baseline_value=baseline_value,
+                log_tail=log_tail,
+                guardrail_results=guardrail_results,
+                metric_delta=analysis.metric_delta,
+            )
+
+            response = self.llm.complete(messages)
+            self.store.update_session_cost(session.id, self.llm.total_cost)
+            logger.info(f"LLM response received (cost so far: ${self.llm.total_cost:.2f})")
+
+            # Parse action
+            action = parse_action(response.content)
+            last_action_str = response.content
+
+            # Handle escalation
+            if action.type == "escalate":
+                logger.info("LLM requested escalation")
+                return self._terminate(session, TerminationReason.LLM_ESCALATION, base_branch)
+
+            # Handle no edits (plateau)
+            if not action.edits:
+                logger.info("LLM proposed no changes - treating as plateau")
+                return self._terminate(session, TerminationReason.PLATEAU, base_branch)
+
+            # Validate action
+            valid, err = validate_action(action, self.config.action_bounds)
+            if not valid:
+                logger.warning(f"Action validation failed: {err}")
+                # Ask LLM to fix
+                messages = build_fix_prompt(err, response.content, self.config, self.repo_path)
+                response = self.llm.complete(messages)
+                action = parse_action(response.content)
+                last_action_str = response.content
+
+                if action.type == "escalate" or not action.edits:
+                    return self._terminate(session, TerminationReason.PLATEAU, base_branch)
+
+            # Apply action
+            logger.info(f"Applying {len(action.edits)} edit(s)...")
+            success, apply_err = apply_action(action, self.repo_path)
+
+            if not success:
+                logger.warning(f"Action apply failed: {apply_err}")
+                # Ask LLM to fix
+                messages = build_fix_prompt(apply_err, response.content, self.config, self.repo_path)
+                response = self.llm.complete(messages)
+                action = parse_action(response.content)
+
+                if action.type == "escalate" or not action.edits:
+                    return self._terminate(session, TerminationReason.PLATEAU, base_branch)
+
+                success, _ = apply_action(action, self.repo_path)
+                if not success:
+                    continue  # Let retry logic handle
+
+            # Commit changes
+            commit_msg = f"Revis iteration {iteration}: {action.rationale}"
+            sha = self.git.commit(commit_msg)
+            self.git.push(session.branch)
+            self.store.set_run_commit(run_id, sha)
+
+            # Record decision
+            self.store.attach_decision(run_id, Decision(
+                action_type="code_patch",
+                rationale=action.rationale,
+                commit_sha=sha,
+            ))
+
+            logger.info(f"Committed {sha[:7]}: {action.rationale}")
+
+            # Update budget for runs
+            if budget.type == "runs":
+                self.store.update_session_budget(session.id, iteration)
+
+            # Refresh session
+            session = self.store.get_session(session.id)
+
+    def _terminate(
+        self,
+        session: Session,
+        reason: TerminationReason,
+        base_branch: str,
+    ) -> Session:
+        """Terminate session and create PR."""
+        logger.info(f"Terminating session: {reason.value}")
+
+        # Get all runs and their data
+        runs = self.store.query_runs(session_id=session.id, limit=100)
+        runs = list(reversed(runs))  # Oldest first
+
+        run_metrics = {}
+        decisions = {}
+        for run in runs:
+            metrics = self.store.get_run_metrics(run.id)
+            run_metrics[run.id] = {m.name: m.value for m in metrics}
+
+            run_decisions = self.store.get_decisions(run.id)
+            if run_decisions:
+                decisions[run.id] = run_decisions[0].rationale
+
+        # Get baseline value
+        metric_history = self.analyzer.get_metric_history(session.id)
+        baseline_value = metric_history[0] if metric_history else None
+
+        # Create PR if GitHub is configured
+        pr_url = None
+        if self.github and runs:
+            try:
+                owner, repo = self.git.get_repo_info()
+
+                title = f"Revis: {reason.value.replace('_', ' ').title()}"
+                body = format_pr_body(
+                    session=session,
+                    runs=runs,
+                    run_metrics=run_metrics,
+                    decisions=decisions,
+                    primary_metric=self.config.metrics.primary,
+                    baseline_value=baseline_value,
+                    fallback_used=self.llm.fallback_used,
+                )
+
+                pr_url = self.github.create_pr(
+                    owner=owner,
+                    repo=repo,
+                    title=title,
+                    body=body,
+                    head=session.branch,
+                    base=base_branch,
+                )
+                logger.info(f"Created PR: {pr_url}")
+
+                # Auto-merge if configured and conditions met
+                if self.config.github.auto_merge.enabled:
+                    should_merge = False
+
+                    if reason == TerminationReason.TARGET_ACHIEVED:
+                        should_merge = True
+                    elif self.config.github.auto_merge.min_improvement_percent is not None:
+                        # Check improvement
+                        if baseline_value and metric_history:
+                            final_value = metric_history[-1]
+                            if self.config.metrics.minimize:
+                                improvement = (baseline_value - final_value) / abs(baseline_value) * 100
+                            else:
+                                improvement = (final_value - baseline_value) / abs(baseline_value) * 100
+                            should_merge = improvement >= self.config.github.auto_merge.min_improvement_percent
+
+                    if should_merge and not self.config.github.auto_merge.require_target_achieved:
+                        self.github.merge_pr(owner, repo, pr_url)
+                        logger.info("Auto-merged PR")
+                    elif should_merge and reason == TerminationReason.TARGET_ACHIEVED:
+                        self.github.merge_pr(owner, repo, pr_url)
+                        logger.info("Auto-merged PR (target achieved)")
+
+            except Exception as e:
+                logger.error(f"Failed to create PR: {e}")
+
+        # End session
+        self.store.end_session(session.id, reason, pr_url)
+
+        # Checkout back to base branch
+        self.git.checkout(base_branch)
+
+        return self.store.get_session(session.id)
+
+
+def run_loop(
+    config: RevisConfig,
+    budget: Budget,
+    baseline_run_id: str | None = None,
+) -> Session:
+    """Run the main Revis loop."""
+    repo_path = Path.cwd()
+    store = SQLiteRunStore(REVIS_DIR / "revis.db")
+
+    loop = RevisLoop(config, store, repo_path)
+    return loop.run(budget, baseline_run_id)
+
+
+def resume_loop(config: RevisConfig, session: Session) -> Session:
+    """Resume a stopped session."""
+    repo_path = Path.cwd()
+    store = SQLiteRunStore(REVIS_DIR / "revis.db")
+
+    # Calculate remaining budget
+    remaining = session.budget.remaining()
+    budget = Budget(type=session.budget.type, value=remaining)
+
+    loop = RevisLoop(config, store, repo_path)
+
+    # Checkout the session branch
+    loop.git.checkout(session.branch)
+
+    return loop.run(budget, session.baseline_run_id)
