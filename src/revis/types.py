@@ -16,6 +16,7 @@ class TerminationReason(str, Enum):
     RETRY_EXHAUSTION = "retry_exhaustion"
     LLM_ESCALATION = "llm_escalation"
     USER_STOP = "user_stop"
+    ERROR = "error"
 
 
 class Budget(BaseModel):

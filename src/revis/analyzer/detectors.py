@@ -80,11 +80,12 @@ def detect_plateau(
     minimize: bool = True,
 ) -> GuardrailResult:
     """Detect if metric has plateaued (no improvement for N runs)."""
-    if len(metric_history) < n_runs:
+    # Need n_runs + 1 to have something to compare against
+    if len(metric_history) <= n_runs:
         return GuardrailResult(
             triggered=False,
             guardrail="plateau_detection",
-            message=f"Not enough history ({len(metric_history)} < {n_runs} runs)",
+            message=f"Not enough history ({len(metric_history)} <= {n_runs} runs)",
         )
 
     recent = metric_history[-n_runs:]

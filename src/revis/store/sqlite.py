@@ -97,7 +97,12 @@ class SQLiteRunStore:
         reason: TerminationReason,
         pr_url: str | None,
     ) -> None:
-        status = "completed" if reason == TerminationReason.TARGET_ACHIEVED else "stopped"
+        if reason == TerminationReason.TARGET_ACHIEVED:
+            status = "completed"
+        elif reason == TerminationReason.ERROR:
+            status = "failed"
+        else:
+            status = "stopped"
         self.conn.execute(
             """
             UPDATE sessions
