@@ -36,6 +36,7 @@ class Session(BaseModel):
     """A Revis session."""
 
     id: str
+    name: str
     branch: str
     base_sha: str
     baseline_run_id: str | None = None
@@ -48,6 +49,7 @@ class Session(BaseModel):
     pr_url: str | None = None
     llm_cost_usd: float = 0.0
     retry_budget: int = 3
+    exported_at: datetime | None = None
 
 
 class Run(BaseModel):

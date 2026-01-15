@@ -3,6 +3,7 @@
 -- Sessions table
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
+    name TEXT UNIQUE,  -- User-provided session name
     branch TEXT NOT NULL,
     base_sha TEXT NOT NULL,
     baseline_run_id TEXT,
@@ -17,7 +18,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     llm_cost_usd REAL NOT NULL DEFAULT 0,
     retry_budget INTEGER NOT NULL DEFAULT 3,
     iteration_count INTEGER NOT NULL DEFAULT 0,
-    pid INTEGER  -- Local process ID for orphan detection
+    pid INTEGER,  -- Local process ID for orphan detection
+    exported_at TIMESTAMP  -- When exported to remote
 );
 
 -- Runs table
@@ -77,3 +79,4 @@ CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_metrics_run ON metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name);

@@ -11,6 +11,7 @@ class RunStore(Protocol):
     # Session management
     def create_session(
         self,
+        name: str,
         branch: str,
         base_sha: str,
         budget: Budget,
@@ -34,6 +35,30 @@ class RunStore(Protocol):
 
     def get_running_session(self) -> Session | None:
         """Get the currently running session, if any."""
+        ...
+
+    def get_session_by_name(self, name: str) -> Session | None:
+        """Get session by name."""
+        ...
+
+    def list_sessions(
+        self,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[Session]:
+        """List all sessions, optionally filtered by status."""
+        ...
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session and all related data. Returns True if deleted."""
+        ...
+
+    def mark_session_exported(self, session_id: str, pr_url: str | None) -> None:
+        """Mark session as exported."""
+        ...
+
+    def session_name_exists(self, name: str) -> bool:
+        """Check if a session name already exists."""
         ...
 
     def update_session_budget(self, session_id: str, budget_used: int) -> None:

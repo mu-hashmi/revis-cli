@@ -103,14 +103,14 @@ def status(
             if orphaned:
                 console.print("[yellow]Warning:[/yellow] Found orphaned session(s):")
                 for s in orphaned:
-                    console.print(f"  - {s.id} (branch: {s.branch})")
+                    console.print(f"  - {s.name} (branch: {s.branch})")
                 console.print("\nUse 'revis stop' to clean up.")
             else:
                 console.print("No active session.")
             return
 
         # Session info
-        console.print(f"[bold]Session:[/bold] {session.id}")
+        console.print(f"[bold]Session:[/bold] {session.name}")
         console.print(f"[bold]Branch:[/bold] {session.branch}")
         console.print(f"[bold]Status:[/bold] {session.status}")
         console.print(f"[bold]Iteration:[/bold] {session.iteration_count}")
@@ -166,6 +166,7 @@ def status(
 
 @app.command()
 def loop(
+    name: str = typer.Option(..., "--name", "-n", help="Session name (used for branch name)"),
     budget: str = typer.Option(..., help="Budget: time (e.g., 8h) or run count (e.g., 10)"),
     budget_type: str = typer.Option("time", "--type", "-t", help="Budget type: time or runs"),
     baseline: str | None = typer.Option(None, "--baseline", "-b", help="Baseline run ID"),
@@ -175,10 +176,21 @@ def loop(
     setup_logging(verbose)
     store = get_store()
 
-    # Check for existing session
+    # Validate name
+    if not name.replace("-", "").replace("_", "").isalnum():
+        console.print("[red]Error:[/red] Session name must be alphanumeric (dashes/underscores allowed)")
+        raise typer.Exit(1)
+
+    # Check for name conflict
+    if store.session_name_exists(name):
+        console.print(f"[red]Error:[/red] Session '{name}' already exists.")
+        console.print("Use 'revis list' to see existing sessions or choose a different name.")
+        raise typer.Exit(1)
+
+    # Check for existing running session
     existing = store.get_running_session()
     if existing:
-        console.print(f"[red]Error:[/red] Session {existing.id} is already running.")
+        console.print(f"[red]Error:[/red] Session '{existing.name}' is already running.")
         console.print("Use 'revis status' to check progress or 'revis stop' to stop it.")
         raise typer.Exit(1)
 
@@ -197,19 +209,18 @@ def loop(
     else:
         budget_obj = Budget(type="runs", value=int(budget))
 
-    console.print(f"[green]Starting Revis loop[/green]")
+    console.print(f"[green]Starting Revis session '{name}'[/green]")
+    console.print(f"  Branch: revis/{name}")
     console.print(f"  Budget: {budget} ({budget_type})")
     console.print(f"  Model: {config.llm.model}")
     console.print(f"  Primary metric: {config.metrics.primary}")
 
-    # Import and run the main loop
     from revis.loop import run_loop
 
     try:
-        session = run_loop(config, budget_obj, baseline)
+        session = run_loop(config, name, budget_obj, baseline)
         console.print(f"\n[green]Session completed:[/green] {session.termination_reason}")
-        if session.pr_url:
-            console.print(f"PR: {session.pr_url}")
+        console.print(f"\nTo export: revis export {name}")
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow] Use 'revis stop' to gracefully stop.")
         raise typer.Exit(1)
@@ -217,31 +228,30 @@ def loop(
 
 @app.command()
 def resume(
-    session_id: str = typer.Argument(..., help="Session ID to resume"),
+    name: str = typer.Argument(..., help="Session name to resume"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
 ):
     """Resume a stopped session."""
     setup_logging(verbose)
     store = get_store()
 
-    session = store.get_session(session_id)
+    session = store.get_session_by_name(name)
     if session is None:
-        console.print(f"[red]Error:[/red] Session {session_id} not found.")
+        console.print(f"[red]Error:[/red] Session '{name}' not found.")
         raise typer.Exit(1)
 
     if session.status == "running":
-        console.print(f"[red]Error:[/red] Session {session_id} is already running.")
+        console.print(f"[red]Error:[/red] Session '{name}' is already running.")
         raise typer.Exit(1)
 
     if session.status == "completed":
-        console.print(f"[red]Error:[/red] Session {session_id} is already completed.")
+        console.print(f"[red]Error:[/red] Session '{name}' is already completed.")
         raise typer.Exit(1)
 
-    console.print(f"[green]Resuming session {session_id}[/green]")
+    console.print(f"[green]Resuming session '{name}'[/green]")
     console.print(f"  Remaining budget: {session.budget.remaining()}")
     console.print(f"  Iteration: {session.iteration_count}")
 
-    # Load config and resume
     config_path = Path(CONFIG_FILE)
     config = load_config(config_path)
 
@@ -249,8 +259,7 @@ def resume(
 
     session = resume_loop(config, session)
     console.print(f"\n[green]Session completed:[/green] {session.termination_reason}")
-    if session.pr_url:
-        console.print(f"PR: {session.pr_url}")
+    console.print(f"\nTo export: revis export {name}")
 
 
 @app.command()
@@ -263,7 +272,7 @@ def stop():
         console.print("No active session to stop.")
         raise typer.Exit(0)
 
-    console.print(f"[yellow]Stopping session {session.id}[/yellow]")
+    console.print(f"[yellow]Stopping session '{session.name}'[/yellow]")
 
     # Create stop signal file
     stop_file = Path(REVIS_DIR) / "stop_signal"
@@ -271,6 +280,327 @@ def stop():
 
     console.print("Stop signal sent. The session will stop after the current run completes.")
     console.print("Use 'revis status' to monitor.")
+
+
+@app.command("list")
+def list_sessions(
+    all_sessions: bool = typer.Option(False, "--all", "-a", help="Show all sessions including completed"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show additional details"),
+):
+    """List all Revis sessions."""
+    store = get_store()
+
+    sessions = store.list_sessions(limit=100)
+
+    if not sessions:
+        console.print("No sessions found.")
+        return
+
+    table = Table(title="Revis Sessions")
+    table.add_column("Name", style="cyan")
+    table.add_column("Status")
+    table.add_column("Iterations", justify="right")
+    table.add_column("Budget")
+    table.add_column("Exported", justify="center")
+
+    if verbose:
+        table.add_column("Branch")
+        table.add_column("Started")
+
+    for session in sessions:
+        status_style = {
+            "running": "green",
+            "completed": "blue",
+            "stopped": "yellow",
+            "failed": "red",
+        }.get(session.status, "white")
+
+        # Budget display
+        if session.budget.type == "time":
+            budget_str = f"{format_duration(session.budget.used)}/{format_duration(session.budget.value)}"
+        else:
+            budget_str = f"{session.budget.used}/{session.budget.value} runs"
+
+        exported = "[green]\u2713[/green]" if session.exported_at else "[dim]-[/dim]"
+
+        row = [
+            session.name,
+            f"[{status_style}]{session.status}[/{status_style}]",
+            str(session.iteration_count),
+            budget_str,
+            exported,
+        ]
+
+        if verbose:
+            row.extend([
+                session.branch,
+                session.started_at.strftime("%Y-%m-%d %H:%M"),
+            ])
+
+        table.add_row(*row)
+
+    console.print(table)
+
+
+@app.command()
+def show(
+    name: str = typer.Argument(..., help="Session name to show"),
+):
+    """Show detailed information about a session."""
+    store = get_store()
+
+    session = store.get_session_by_name(name)
+    if session is None:
+        console.print(f"[red]Error:[/red] Session '{name}' not found.")
+        raise typer.Exit(1)
+
+    # Session header
+    console.print(f"\n[bold]Session: {session.name}[/bold]")
+    console.print(f"  ID: {session.id}")
+    console.print(f"  Branch: {session.branch}")
+    console.print(f"  Status: {session.status}")
+    if session.termination_reason:
+        console.print(f"  Termination: {session.termination_reason.value}")
+
+    # Times
+    console.print(f"\n[bold]Timeline:[/bold]")
+    console.print(f"  Started: {session.started_at}")
+    if session.ended_at:
+        console.print(f"  Ended: {session.ended_at}")
+        duration = session.ended_at - session.started_at
+        console.print(f"  Duration: {format_duration(int(duration.total_seconds()))}")
+    if session.exported_at:
+        console.print(f"  Exported: {session.exported_at}")
+        if session.pr_url:
+            console.print(f"  PR: {session.pr_url}")
+
+    # Budget
+    console.print(f"\n[bold]Budget:[/bold]")
+    if session.budget.type == "time":
+        console.print(f"  Time: {format_duration(session.budget.used)} / {format_duration(session.budget.value)}")
+    else:
+        console.print(f"  Runs: {session.budget.used} / {session.budget.value}")
+    console.print(f"  LLM Cost: ${session.llm_cost_usd:.2f}")
+    console.print(f"  Retries Remaining: {session.retry_budget}")
+
+    # Runs table
+    runs = store.query_runs(session_id=session.id, limit=50)
+    if runs:
+        console.print(f"\n[bold]Iterations ({session.iteration_count}):[/bold]")
+
+        table = Table()
+        table.add_column("#", justify="right")
+        table.add_column("Status")
+        table.add_column("Metrics")
+        table.add_column("Change")
+        table.add_column("Duration")
+
+        for run in reversed(runs):
+            metrics = store.get_run_metrics(run.id)
+            metrics_str = ", ".join(f"{m.name}={m.value:.4f}" for m in metrics[:3])
+            if not metrics_str:
+                metrics_str = "N/A"
+
+            decisions = store.get_decisions(run.id)
+            if decisions:
+                rationale = decisions[0].rationale
+                change_str = rationale[:40] + "..." if len(rationale) > 40 else rationale
+            else:
+                change_str = "Initial"
+
+            duration_str = ""
+            if run.started_at and run.ended_at:
+                secs = (run.ended_at - run.started_at).total_seconds()
+                duration_str = format_duration(int(secs))
+            elif run.started_at:
+                duration_str = "running..."
+
+            status_style = {"completed": "green", "failed": "red", "running": "yellow"}.get(run.status, "white")
+
+            table.add_row(
+                str(run.iteration_number),
+                f"[{status_style}]{run.status}[/{status_style}]",
+                metrics_str,
+                change_str,
+                duration_str,
+            )
+
+        console.print(table)
+
+
+@app.command()
+def export(
+    name: str = typer.Argument(..., help="Session name to export"),
+    no_pr: bool = typer.Option(False, "--no-pr", help="Push branch but don't create PR"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force push (use with caution)"),
+):
+    """Export a session to remote and optionally create a PR."""
+    store = get_store()
+
+    session = store.get_session_by_name(name)
+    if session is None:
+        console.print(f"[red]Error:[/red] Session '{name}' not found.")
+        raise typer.Exit(1)
+
+    if session.status == "running":
+        console.print(f"[red]Error:[/red] Cannot export running session. Stop it first with 'revis stop'.")
+        raise typer.Exit(1)
+
+    if session.exported_at and not force:
+        console.print(f"[yellow]Warning:[/yellow] Session already exported at {session.exported_at}")
+        if session.pr_url:
+            console.print(f"  PR: {session.pr_url}")
+        if not typer.confirm("Export again?"):
+            raise typer.Exit(0)
+
+    # Load config for PR body
+    config_path = Path(CONFIG_FILE)
+    config = load_config(config_path)
+
+    from revis.github.pr import GitConfig, GitHubManager, GitManager, format_pr_body
+    from revis.analyzer.compare import RunAnalyzer
+
+    repo_path = Path.cwd()
+    git = GitManager(GitConfig(repo_path=repo_path))
+
+    # Ensure we're on the session branch for push
+    current_branch = git.get_current_branch()
+    if current_branch != session.branch:
+        console.print(f"Checking out branch {session.branch}...")
+        git.checkout(session.branch)
+
+    # Push to remote
+    console.print(f"Pushing branch {session.branch} to origin...")
+    try:
+        git.push(session.branch, force=force)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] Failed to push: {e}")
+        if current_branch != session.branch:
+            git.checkout(current_branch)
+        raise typer.Exit(1)
+
+    pr_url = None
+
+    if not no_pr:
+        try:
+            github = GitHubManager()
+        except ValueError:
+            console.print("[yellow]Warning:[/yellow] GITHUB_TOKEN not set - skipping PR creation.")
+            console.print("Set GITHUB_TOKEN environment variable to enable PR creation.")
+        else:
+            console.print("Creating pull request...")
+
+            runs = store.query_runs(session_id=session.id, limit=100)
+            runs = list(reversed(runs))
+
+            run_metrics = {}
+            decisions = {}
+            for run in runs:
+                metrics = store.get_run_metrics(run.id)
+                run_metrics[run.id] = {m.name: m.value for m in metrics}
+                run_decisions = store.get_decisions(run.id)
+                if run_decisions:
+                    decisions[run.id] = run_decisions[0].rationale
+
+            analyzer = RunAnalyzer(
+                store=store,
+                primary_metric=config.metrics.primary,
+                minimize=config.metrics.minimize,
+            )
+            metric_history = analyzer.get_metric_history(session.id)
+            baseline_value = metric_history[0] if metric_history else None
+
+            owner, repo = git.get_repo_info()
+
+            title = f"Revis/{session.name}"
+            if session.termination_reason:
+                title = f"Revis/{session.name}: {session.termination_reason.value.replace('_', ' ').title()}"
+
+            body = format_pr_body(
+                session=session,
+                runs=runs,
+                run_metrics=run_metrics,
+                decisions=decisions,
+                primary_metric=config.metrics.primary,
+                baseline_value=baseline_value,
+            )
+
+            try:
+                pr_url = github.create_pr(
+                    owner=owner,
+                    repo=repo,
+                    title=title,
+                    body=body,
+                    head=session.branch,
+                    base="main",
+                )
+                console.print(f"[green]Created PR:[/green] {pr_url}")
+            except Exception as e:
+                console.print(f"[red]Error:[/red] Failed to create PR: {e}")
+
+    # Mark as exported
+    store.mark_session_exported(session.id, pr_url)
+
+    # Return to original branch
+    if current_branch != session.branch:
+        git.checkout(current_branch)
+
+    console.print(f"[green]Session '{name}' exported successfully.[/green]")
+    if pr_url:
+        console.print(f"  PR: {pr_url}")
+
+
+@app.command()
+def delete(
+    names: list[str] = typer.Argument(..., help="Session name(s) to delete"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+    keep_branch: bool = typer.Option(False, "--keep-branch", help="Don't delete local git branch"),
+):
+    """Delete local session(s) and their branches."""
+    store = get_store()
+
+    # Validate all sessions exist first
+    sessions_to_delete = []
+    for name in names:
+        session = store.get_session_by_name(name)
+        if session is None:
+            console.print(f"[red]Error:[/red] Session '{name}' not found.")
+            raise typer.Exit(1)
+        if session.status == "running":
+            console.print(f"[red]Error:[/red] Cannot delete running session '{name}'. Stop it first.")
+            raise typer.Exit(1)
+        sessions_to_delete.append(session)
+
+    # Confirm
+    if not force:
+        console.print("Will delete the following sessions:")
+        for session in sessions_to_delete:
+            exported = " (exported)" if session.exported_at else ""
+            console.print(f"  - {session.name}: {session.iteration_count} iterations{exported}")
+        if not typer.confirm("Continue?"):
+            raise typer.Exit(0)
+
+    from revis.github.pr import GitConfig, GitManager
+
+    repo_path = Path.cwd()
+    git = GitManager(GitConfig(repo_path=repo_path))
+    current_branch = git.get_current_branch()
+
+    for session in sessions_to_delete:
+        # Delete git branch if requested
+        if not keep_branch:
+            if current_branch == session.branch:
+                console.print(f"[yellow]Warning:[/yellow] Cannot delete branch '{session.branch}' - currently checked out.")
+            elif git.branch_exists(session.branch):
+                try:
+                    git._run("branch", "-D", session.branch)
+                    console.print(f"  Deleted branch: {session.branch}")
+                except Exception as e:
+                    console.print(f"  [yellow]Warning:[/yellow] Could not delete branch: {e}")
+
+        # Delete from database
+        store.delete_session(session.id)
+        console.print(f"[green]Deleted session:[/green] {session.name}")
 
 
 def format_duration(seconds: int) -> str:

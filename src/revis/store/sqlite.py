@@ -38,16 +38,31 @@ class SQLiteRunStore:
         schema = schema_path.read_text()
         self.conn.executescript(schema)
         self.conn.commit()
+        self._migrate()
 
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
 
+    def _migrate(self) -> None:
+        """Run migrations for existing databases."""
+        cursor = self.conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+
+        if "name" not in columns:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT UNIQUE")
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN exported_at TIMESTAMP")
+            self.conn.execute(
+                "UPDATE sessions SET name = 'session-' || id WHERE name IS NULL"
+            )
+            self.conn.commit()
+
     # Session management
 
     def create_session(
         self,
+        name: str,
         branch: str,
         base_sha: str,
         budget: Budget,
@@ -57,12 +72,13 @@ class SQLiteRunStore:
         self.conn.execute(
             """
             INSERT INTO sessions (
-                id, branch, base_sha, baseline_run_id,
+                id, name, branch, base_sha, baseline_run_id,
                 budget_type, budget_value, retry_budget, pid
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
+                name,
                 branch,
                 base_sha,
                 baseline_run_id,
@@ -107,6 +123,66 @@ class SQLiteRunStore:
         if row is None:
             return None
         return self._row_to_session(row)
+
+    def get_session_by_name(self, name: str) -> Session | None:
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_session(row)
+
+    def list_sessions(
+        self,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[Session]:
+        query = "SELECT * FROM sessions"
+        params: list = []
+
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+
+        query += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [self._row_to_session(row) for row in rows]
+
+    def delete_session(self, session_id: str) -> bool:
+        session = self.get_session(session_id)
+        if session is None:
+            return False
+        if session.status == "running":
+            raise ValueError("Cannot delete running session")
+
+        runs = self.query_runs(session_id=session_id, limit=1000)
+        run_ids = [r.id for r in runs]
+
+        for run_id in run_ids:
+            self.conn.execute("DELETE FROM decisions WHERE run_id = ?", (run_id,))
+            self.conn.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
+            self.conn.execute("DELETE FROM metrics WHERE run_id = ?", (run_id,))
+            self.conn.execute("DELETE FROM params WHERE run_id = ?", (run_id,))
+
+        self.conn.execute("DELETE FROM runs WHERE session_id = ?", (session_id,))
+        self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        self.conn.commit()
+        return True
+
+    def mark_session_exported(self, session_id: str, pr_url: str | None) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET exported_at = ?, pr_url = ? WHERE id = ?",
+            (datetime.now().isoformat(), pr_url, session_id),
+        )
+        self.conn.commit()
+
+    def session_name_exists(self, name: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sessions WHERE name = ? LIMIT 1", (name,)
+        ).fetchone()
+        return row is not None
 
     def get_orphaned_sessions(self) -> list[Session]:
         """Get sessions marked as running but whose process is dead."""
@@ -164,6 +240,7 @@ class SQLiteRunStore:
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         return Session(
             id=row["id"],
+            name=row["name"],
             branch=row["branch"],
             base_sha=row["base_sha"],
             baseline_run_id=row["baseline_run_id"],
@@ -186,6 +263,9 @@ class SQLiteRunStore:
             pr_url=row["pr_url"],
             llm_cost_usd=row["llm_cost_usd"],
             retry_budget=row["retry_budget"],
+            exported_at=(
+                datetime.fromisoformat(row["exported_at"]) if row["exported_at"] else None
+            ),
         )
 
     # Run management

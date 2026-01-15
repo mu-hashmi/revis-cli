@@ -27,6 +27,7 @@ class TestSessionManagement:
     def test_create_session(self, store):
         budget = Budget(type="time", value=3600)
         session_id = store.create_session(
+            name="test-session",
             branch="revis/test-session",
             base_sha="abc123",
             budget=budget,
@@ -38,6 +39,7 @@ class TestSessionManagement:
     def test_get_session(self, store):
         budget = Budget(type="runs", value=10)
         session_id = store.create_session(
+            name="test",
             branch="revis/test",
             base_sha="def456",
             budget=budget,
@@ -47,6 +49,7 @@ class TestSessionManagement:
 
         assert session is not None
         assert session.id == session_id
+        assert session.name == "test"
         assert session.branch == "revis/test"
         assert session.base_sha == "def456"
         assert session.budget.type == "runs"
@@ -56,6 +59,7 @@ class TestSessionManagement:
     def test_get_running_session(self, store):
         budget = Budget(type="time", value=7200)
         session_id = store.create_session(
+            name="running",
             branch="revis/running",
             base_sha="123abc",
             budget=budget,
@@ -73,6 +77,7 @@ class TestSessionManagement:
     def test_end_session(self, store):
         budget = Budget(type="time", value=3600)
         session_id = store.create_session(
+            name="ending",
             branch="revis/ending",
             base_sha="xyz789",
             budget=budget,
@@ -92,6 +97,7 @@ class TestSessionManagement:
     def test_update_budget(self, store):
         budget = Budget(type="time", value=3600)
         session_id = store.create_session(
+            name="budget",
             branch="revis/budget",
             base_sha="aaa111",
             budget=budget,
@@ -105,6 +111,7 @@ class TestSessionManagement:
     def test_increment_iteration(self, store):
         budget = Budget(type="runs", value=10)
         session_id = store.create_session(
+            name="iter",
             branch="revis/iter",
             base_sha="bbb222",
             budget=budget,
@@ -121,6 +128,7 @@ class TestRunManagement:
     def test_create_run(self, store):
         budget = Budget(type="runs", value=5)
         session_id = store.create_session(
+            name="runs",
             branch="revis/runs",
             base_sha="ccc333",
             budget=budget,
@@ -138,6 +146,7 @@ class TestRunManagement:
     def test_get_run(self, store):
         budget = Budget(type="runs", value=5)
         session_id = store.create_session(
+            name="getrun",
             branch="revis/getrun",
             base_sha="ddd444",
             budget=budget,
@@ -161,6 +170,7 @@ class TestRunManagement:
     def test_set_run_status(self, store):
         budget = Budget(type="runs", value=5)
         session_id = store.create_session(
+            name="status",
             branch="revis/status",
             base_sha="eee555",
             budget=budget,
@@ -181,6 +191,7 @@ class TestRunManagement:
     def test_query_runs(self, store):
         budget = Budget(type="runs", value=10)
         session_id = store.create_session(
+            name="query",
             branch="revis/query",
             base_sha="fff666",
             budget=budget,
@@ -200,6 +211,7 @@ class TestRunManagement:
     def test_log_metrics(self, store):
         budget = Budget(type="runs", value=5)
         session_id = store.create_session(
+            name="metrics",
             branch="revis/metrics",
             base_sha="ggg777",
             budget=budget,
@@ -222,6 +234,7 @@ class TestDecisionTracking:
     def test_attach_decision(self, store):
         budget = Budget(type="runs", value=5)
         session_id = store.create_session(
+            name="decisions",
             branch="revis/decisions",
             base_sha="hhh888",
             budget=budget,
@@ -250,6 +263,7 @@ class TestDecisionTracking:
     def test_update_decision_commit(self, store):
         budget = Budget(type="runs", value=5)
         session_id = store.create_session(
+            name="commit",
             branch="revis/commit",
             base_sha="iii999",
             budget=budget,

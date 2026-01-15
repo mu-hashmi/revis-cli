@@ -14,7 +14,7 @@ from revis.evaluator.harness import EvalHarness
 from revis.executor.base import Executor
 from revis.executor.local import LocalConfig, LocalExecutor
 from revis.executor.ssh import SSHConfig, SSHExecutor
-from revis.github.pr import GitConfig, GitHubManager, GitManager, format_pr_body
+from revis.github.pr import GitConfig, GitManager
 from revis.llm.actions import apply_action, parse_action, validate_action
 from revis.llm.client import LLMClient
 from revis.llm.prompts import build_fix_prompt, build_prompt
@@ -64,15 +64,9 @@ class RevisLoop:
         )
         self.guardrails = GuardrailChecker(config.guardrails)
 
-        # GitHub manager (optional - only if GITHUB_TOKEN set)
-        try:
-            self.github = GitHubManager()
-        except ValueError:
-            self.github = None
-            logger.warning("GITHUB_TOKEN not set - PR creation disabled")
-
     def run(
         self,
+        name: str,
         budget: Budget,
         baseline_run_id: str | None = None,
     ) -> Session:
@@ -81,18 +75,21 @@ class RevisLoop:
         if STOP_SIGNAL_FILE.exists():
             STOP_SIGNAL_FILE.unlink()
 
-        # Create session
+        # Create session with user-provided name
         base_sha = self.git.get_head_sha()
         base_branch = self.git.get_current_branch()
+        branch_name = f"revis/{name}"
+
         session_id = self.store.create_session(
-            branch=f"revis/session-{base_sha[:8]}",
+            name=name,
+            branch=branch_name,
             base_sha=base_sha,
             budget=budget,
             baseline_run_id=baseline_run_id,
         )
 
         session = self.store.get_session(session_id)
-        logger.info(f"Started session {session_id} on branch {session.branch}")
+        logger.info(f"Started session '{name}' (ID: {session_id}) on branch {session.branch}")
 
         # Create working branch
         if not self.git.branch_exists(session.branch):
@@ -174,7 +171,8 @@ class RevisLoop:
             }
 
             # Redirect output to log file in run output dir
-            train_cmd = f"mkdir -p {run_output_dir} && {train_cmd} 2>&1 | tee {run_output_dir}/train.log"
+            # Use pipefail so exit code reflects training failure, not tee success
+            train_cmd = f"set -o pipefail; mkdir -p {run_output_dir} && {train_cmd} 2>&1 | tee {run_output_dir}/train.log"
 
             logger.info(f"Launching training: {train_cmd}")
             logger.info(f"Run output dir: {run_output_dir}")
@@ -214,8 +212,7 @@ class RevisLoop:
                         if valid:
                             success, _ = apply_action(action, self.repo_path)
                             if success:
-                                sha = self.git.commit(f"Revis fix: {action.rationale}")
-                                self.git.push(session.branch)
+                                self.git.commit(f"Revis fix: {action.rationale}")
                 continue
 
             # Handle run failure
@@ -254,7 +251,6 @@ class RevisLoop:
                             success, apply_err = apply_action(action, self.repo_path)
                             if success:
                                 sha = self.git.commit(f"Revis fix: {action.rationale}")
-                                self.git.push(session.branch)
                                 self.store.attach_decision(run_id, Decision(
                                     action_type="code_patch",
                                     rationale=action.rationale,
@@ -408,10 +404,9 @@ class RevisLoop:
                 if not success:
                     continue  # Let retry logic handle
 
-            # Commit changes
+            # Commit changes (local only - push happens on export)
             commit_msg = f"Revis iteration {iteration}: {action.rationale}"
             sha = self.git.commit(commit_msg)
-            self.git.push(session.branch)
             self.store.set_run_commit(run_id, sha)
 
             # Record decision
@@ -436,91 +431,52 @@ class RevisLoop:
         reason: TerminationReason,
         base_branch: str,
     ) -> Session:
-        """Terminate session and create PR."""
+        """Terminate session locally (no PR creation - use revis export)."""
         logger.info(f"Terminating session: {reason.value}")
 
-        # Get all runs and their data
-        runs = self.store.query_runs(session_id=session.id, limit=100)
-        runs = list(reversed(runs))  # Oldest first
-
-        run_metrics = {}
-        decisions = {}
-        for run in runs:
-            metrics = self.store.get_run_metrics(run.id)
-            run_metrics[run.id] = {m.name: m.value for m in metrics}
-
-            run_decisions = self.store.get_decisions(run.id)
-            if run_decisions:
-                decisions[run.id] = run_decisions[0].rationale
-
-        # Get baseline value
-        metric_history = self.analyzer.get_metric_history(session.id)
-        baseline_value = metric_history[0] if metric_history else None
-
-        # Create PR if GitHub is configured
-        pr_url = None
-        if self.github and runs:
-            try:
-                owner, repo = self.git.get_repo_info()
-
-                title = f"Revis: {reason.value.replace('_', ' ').title()}"
-                body = format_pr_body(
-                    session=session,
-                    runs=runs,
-                    run_metrics=run_metrics,
-                    decisions=decisions,
-                    primary_metric=self.config.metrics.primary,
-                    baseline_value=baseline_value,
-                    fallback_used=self.llm.fallback_used,
-                )
-
-                pr_url = self.github.create_pr(
-                    owner=owner,
-                    repo=repo,
-                    title=title,
-                    body=body,
-                    head=session.branch,
-                    base=base_branch,
-                )
-                logger.info(f"Created PR: {pr_url}")
-
-                # Auto-merge if configured and conditions met
-                if self.config.github.auto_merge.enabled:
-                    should_merge = False
-
-                    if reason == TerminationReason.TARGET_ACHIEVED:
-                        should_merge = True
-                    elif self.config.github.auto_merge.min_improvement_percent is not None:
-                        # Check improvement
-                        if baseline_value and metric_history:
-                            final_value = metric_history[-1]
-                            if self.config.metrics.minimize:
-                                improvement = (baseline_value - final_value) / abs(baseline_value) * 100
-                            else:
-                                improvement = (final_value - baseline_value) / abs(baseline_value) * 100
-                            should_merge = improvement >= self.config.github.auto_merge.min_improvement_percent
-
-                    if should_merge and not self.config.github.auto_merge.require_target_achieved:
-                        self.github.merge_pr(owner, repo, pr_url)
-                        logger.info("Auto-merged PR")
-                    elif should_merge and reason == TerminationReason.TARGET_ACHIEVED:
-                        self.github.merge_pr(owner, repo, pr_url)
-                        logger.info("Auto-merged PR (target achieved)")
-
-            except Exception as e:
-                logger.error(f"Failed to create PR: {e}")
-
-        # End session
-        self.store.end_session(session.id, reason, pr_url)
+        # End session - no PR URL since we're not creating one here
+        self.store.end_session(session.id, reason, pr_url=None)
 
         # Checkout back to base branch
         self.git.checkout(base_branch)
 
         return self.store.get_session(session.id)
 
+    def _resume(
+        self,
+        session: Session,
+        budget: Budget,
+    ) -> Session:
+        """Resume an existing session."""
+        # Clear any stale stop signal
+        if STOP_SIGNAL_FILE.exists():
+            STOP_SIGNAL_FILE.unlink()
+
+        # Get base branch from the session's base_sha
+        # We need to figure out what branch it was based on
+        # For now, use 'main' as default, but ideally this would be stored
+        base_branch = "main"
+
+        # Track start time for time-based budget
+        start_time = time.time()
+
+        logger.info(f"Resuming session '{session.name}' (ID: {session.id})")
+
+        try:
+            return self._run_loop(session, budget, start_time, base_branch)
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+            return self._terminate(session, TerminationReason.USER_STOP, base_branch)
+        except Exception as e:
+            logger.error(f"Loop failed with error: {e}")
+            raise
+        finally:
+            self.executor.close()
+
 
 def run_loop(
     config: RevisConfig,
+    name: str,
     budget: Budget,
     baseline_run_id: str | None = None,
 ) -> Session:
@@ -529,7 +485,7 @@ def run_loop(
     store = SQLiteRunStore(REVIS_DIR / "revis.db")
 
     loop = RevisLoop(config, store, repo_path)
-    return loop.run(budget, baseline_run_id)
+    return loop.run(name, budget, baseline_run_id)
 
 
 def resume_loop(config: RevisConfig, session: Session) -> Session:
@@ -546,4 +502,5 @@ def resume_loop(config: RevisConfig, session: Session) -> Session:
     # Checkout the session branch
     loop.git.checkout(session.branch)
 
-    return loop.run(budget, session.baseline_run_id)
+    # Resume uses the existing session name
+    return loop._resume(session, budget)

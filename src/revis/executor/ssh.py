@@ -155,8 +155,13 @@ class SSHExecutor:
                         failed=code != 0,
                         error_message=None if code == 0 else f"Process exited with code {code}",
                     )
-                # No exit file, assume success if session ended cleanly
-                return ExitResult(exit_code=0, failed=False)
+                # No exit file - session ended but we can't verify exit code
+                # Assume failure to be safe
+                return ExitResult(
+                    exit_code=-1,
+                    failed=True,
+                    error_message="Process ended but exit code unavailable",
+                )
 
             # Check timeout
             if timeout is not None:

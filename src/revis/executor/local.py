@@ -87,7 +87,12 @@ class LocalExecutor:
                             failed=code != 0,
                             error_message=None if code == 0 else f"Process exited with code {code}",
                         )
-                return ExitResult(exit_code=0, failed=False)
+                # No exit file - session ended but we can't verify exit code
+                return ExitResult(
+                    exit_code=-1,
+                    failed=True,
+                    error_message="Process ended but exit code unavailable",
+                )
 
             if timeout is not None:
                 elapsed = time.time() - start_time
