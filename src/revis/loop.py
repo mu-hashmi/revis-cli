@@ -94,6 +94,9 @@ class RevisLoop:
         self.store = store
         self.repo_path = repo_path
 
+        # Track active training process for cleanup
+        self._active_process_id: str | None = None
+
         # Initialize executor based on type
         if config.executor.type == "local":
             self.executor: Executor = LocalExecutor(LocalConfig(
@@ -117,6 +120,16 @@ class RevisLoop:
             minimize=config.metrics.minimize,
         )
         self.guardrails = GuardrailChecker(config.guardrails)
+
+    def _cleanup_active_process(self) -> None:
+        """Kill any active training process."""
+        if self._active_process_id is not None:
+            logger.info(f"Killing active training process: {self._active_process_id}")
+            try:
+                self.executor.kill(self._active_process_id)
+            except Exception as e:
+                logger.warning(f"Failed to kill process: {e}")
+            self._active_process_id = None
 
     def run(
         self,
@@ -164,6 +177,7 @@ class RevisLoop:
             self._terminate(session, TerminationReason.ERROR, base_branch)
             raise
         finally:
+            self._cleanup_active_process()
             self.executor.close()
 
     def _run_loop(
@@ -238,10 +252,12 @@ class RevisLoop:
 
             try:
                 self.executor.launch(train_cmd, run_env, session_name)
+                self._active_process_id = session_name
 
                 # Wait for completion
                 max_duration = parse_duration(self.config.guardrails.max_run_duration)
                 result = self.executor.wait(session_name, timeout=max_duration)
+                self._active_process_id = None
 
                 self.store.set_run_exit_code(run_id, result.exit_code)
 
@@ -530,6 +546,7 @@ class RevisLoop:
             self._terminate(session, TerminationReason.ERROR, base_branch)
             raise
         finally:
+            self._cleanup_active_process()
             self.executor.close()
 
 
