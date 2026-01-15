@@ -1,6 +1,6 @@
 [project]
 name = "revis"
-version = "0.1.0"
+version = "0.1.4"
 description = "Autonomous ML iteration engine"
 readme = "README.md"
 requires-python = ">=3.11"

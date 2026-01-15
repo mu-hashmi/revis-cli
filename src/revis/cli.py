@@ -2,6 +2,8 @@
 
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,6 +19,22 @@ from revis.types import Budget
 
 app = typer.Typer(help="Revis - Autonomous ML iteration engine")
 console = Console()
+
+TMUX_SESSION_PREFIX = "revis-"
+
+
+def get_tmux_session_name(name: str) -> str:
+    """Get tmux session name for a revis session."""
+    return f"{TMUX_SESSION_PREFIX}{name}"
+
+
+def tmux_session_exists(session_name: str) -> bool:
+    """Check if a tmux session exists."""
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+    )
+    return result.returncode == 0
 
 
 def setup_logging(verbose: bool = False):
@@ -171,8 +189,50 @@ def loop(
     budget_type: str = typer.Option("time", "--type", "-t", help="Budget type: time or runs"),
     baseline: str | None = typer.Option(None, "--baseline", "-b", help="Baseline run ID"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
+    background: bool = typer.Option(False, "--background", "--bg", help="Run in background (tmux)"),
+    _in_tmux: bool = typer.Option(False, "--_in-tmux", hidden=True, help="Internal: already in tmux"),
 ):
     """Start the autonomous iteration loop."""
+    # Handle background mode - launch in tmux and exit
+    if background and not _in_tmux:
+        if not shutil.which("tmux"):
+            console.print("[red]Error:[/red] tmux not installed. Install it or run without --background.")
+            raise typer.Exit(1)
+
+        tmux_name = get_tmux_session_name(name)
+        if tmux_session_exists(tmux_name):
+            console.print(f"[red]Error:[/red] tmux session '{tmux_name}' already exists.")
+            console.print(f"Use 'revis watch {name}' to attach or 'tmux kill-session -t {tmux_name}' to remove it.")
+            raise typer.Exit(1)
+
+        # Build command to re-run ourselves in tmux
+        cmd_parts = ["revis", "loop", "--name", name, "--budget", budget, "--type", budget_type, "--_in-tmux"]
+        if baseline:
+            cmd_parts.extend(["--baseline", baseline])
+        if verbose:
+            cmd_parts.append("--verbose")
+
+        # Escape for shell
+        cmd = " ".join(cmd_parts)
+        cwd = os.getcwd()
+
+        # Launch in tmux
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, "-c", cwd, cmd],
+            check=True,
+        )
+
+        console.print(f"[green]Revis loop started in background[/green]")
+        console.print(f"  Session: {name}")
+        console.print(f"  Budget: {budget} ({budget_type})")
+        console.print()
+        console.print("[bold]Commands:[/bold]")
+        console.print(f"  revis watch {name}    - attach to live output")
+        console.print(f"  revis logs {name}     - show recent output")
+        console.print(f"  revis status         - check session status")
+        console.print(f"  revis stop           - stop the loop")
+        return
+
     setup_logging(verbose)
     store = get_store()
 
@@ -280,6 +340,69 @@ def stop():
 
     console.print("Stop signal sent. The session will stop after the current run completes.")
     console.print("Use 'revis status' to monitor.")
+
+
+@app.command()
+def watch(
+    name: str = typer.Argument(..., help="Session name to watch"),
+):
+    """Attach to a running loop's tmux session."""
+    if not shutil.which("tmux"):
+        console.print("[red]Error:[/red] tmux not installed.")
+        raise typer.Exit(1)
+
+    tmux_name = get_tmux_session_name(name)
+    if not tmux_session_exists(tmux_name):
+        console.print(f"[red]Error:[/red] No tmux session '{tmux_name}' found.")
+        console.print(f"The loop may not be running in background mode, or has already finished.")
+        console.print(f"\nCheck 'revis status' or 'revis list' for session info.")
+        raise typer.Exit(1)
+
+    # Attach to tmux session (replaces current process)
+    os.execvp("tmux", ["tmux", "attach-session", "-t", tmux_name])
+
+
+@app.command()
+def logs(
+    name: str = typer.Argument(..., help="Session name to show logs for"),
+    lines: int = typer.Option(50, "--lines", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow output (like tail -f)"),
+):
+    """Show recent output from a background loop."""
+    if not shutil.which("tmux"):
+        console.print("[red]Error:[/red] tmux not installed.")
+        raise typer.Exit(1)
+
+    tmux_name = get_tmux_session_name(name)
+    if not tmux_session_exists(tmux_name):
+        console.print(f"[red]Error:[/red] No tmux session '{tmux_name}' found.")
+        console.print(f"The loop may not be running in background mode, or has already finished.")
+        raise typer.Exit(1)
+
+    if follow:
+        # Use watch to refresh every second
+        try:
+            while True:
+                os.system("clear")
+                result = subprocess.run(
+                    ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
+                    capture_output=True,
+                    text=True,
+                )
+                print(result.stdout)
+                print(f"\n[Following {tmux_name} - Ctrl+C to stop]")
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    else:
+        # One-shot capture
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
+            capture_output=True,
+            text=True,
+        )
+        console.print(result.stdout)
+        console.print(f"\n[dim]Use 'revis watch {name}' to attach, or 'revis logs {name} -f' to follow[/dim]")
 
 
 @app.command("list")
@@ -566,8 +689,8 @@ def delete(
         if session is None:
             console.print(f"[red]Error:[/red] Session '{name}' not found.")
             raise typer.Exit(1)
-        if session.status == "running":
-            console.print(f"[red]Error:[/red] Cannot delete running session '{name}'. Stop it first.")
+        if session.status == "running" and not force:
+            console.print(f"[red]Error:[/red] Cannot delete running session '{name}'. Stop it first or use --force.")
             raise typer.Exit(1)
         sessions_to_delete.append(session)
 
