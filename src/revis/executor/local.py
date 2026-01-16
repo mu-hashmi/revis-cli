@@ -1,6 +1,5 @@
 """Local executor for running training on the same machine."""
 
-import os
 import subprocess
 import time
 from dataclasses import dataclass

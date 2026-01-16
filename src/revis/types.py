@@ -95,23 +95,6 @@ class Decision(BaseModel):
     commit_sha: str | None = None
 
 
-class FileEdit(BaseModel):
-    """A file edit action."""
-
-    path: str
-    search: str | None = None  # None = full file replacement
-    replace: str
-
-
-class Action(BaseModel):
-    """An action proposed by the LLM."""
-
-    type: Literal["code_patch", "escalate"]
-    edits: list[FileEdit] = []
-    rationale: str
-    significant: bool = False
-
-
 class EvalResult(BaseModel):
     """Result of an evaluation."""
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from revis.config import GuardrailsConfig
-from revis.types import EvalResult, Run
+from revis.types import EvalResult
 
 
 @dataclass

@@ -1,25 +1,18 @@
 """LLM integration module."""
 
-from revis.llm.actions import (
-    ActionApplyError,
-    ActionParseError,
-    ActionValidationError,
-    apply_action,
-    parse_action,
-    validate_action,
-)
-from revis.llm.client import LLMClient, LLMResponse
-from revis.llm.prompts import build_fix_prompt, build_prompt
+from revis.llm.agent import AgentResult, run_agent
+from revis.llm.client import LLMClient, LLMResponse, LLMToolResponse
+from revis.llm.prompts import SYSTEM_PROMPT, build_iteration_context
+from revis.llm.tools import TOOLS, ToolExecutor
 
 __all__ = [
-    "ActionApplyError",
-    "ActionParseError",
-    "ActionValidationError",
+    "AgentResult",
     "LLMClient",
     "LLMResponse",
-    "apply_action",
-    "build_fix_prompt",
-    "build_prompt",
-    "parse_action",
-    "validate_action",
+    "LLMToolResponse",
+    "SYSTEM_PROMPT",
+    "TOOLS",
+    "ToolExecutor",
+    "build_iteration_context",
+    "run_agent",
 ]

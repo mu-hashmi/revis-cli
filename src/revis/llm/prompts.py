@@ -1,89 +1,59 @@
-"""Prompt construction for LLM interactions."""
-
-from pathlib import Path
+"""Prompt construction for LLM agent."""
 
 from revis.analyzer.compare import RunSummary, format_run_history
 from revis.analyzer.detectors import GuardrailResult
-from revis.config import ActionBoundsConfig, ContextConfig, RevisConfig
-from revis.types import EvalResult, Session
+from revis.types import EvalResult
 
+SYSTEM_PROMPT = """You are Revis, an autonomous ML training optimizer. Your job is to analyze training results and propose changes to improve model metrics.
 
-SYSTEM_PROMPT = """You are Revis, an autonomous ML training optimizer. Your job is to analyze training results and propose changes to improve the model.
+## What you receive
 
-You will receive:
-- Repository context (config files, model code)
-- Run history with metrics
-- Current run results
-- Training log tail
-- Analysis of guardrail checks
+Each iteration, you'll be given:
+- Run history with metrics from previous iterations
+- Current run results (eval.json metrics) with target metric goal
+- Training log tail (last 200 lines)
+- Analysis of guardrail checks (NaN detection, divergence, plateau)
 
-Based on this information, you must propose a change to improve the primary metric. Changes can be:
-1. Config changes (learning rate, batch size, etc.)
-2. Code changes (model architecture, data processing, etc.)
+## What you MUST do
 
-IMPORTANT RULES:
-- You MUST propose a change. If you truly cannot improve further, emit <escalate/>.
-- Keep changes focused and minimal - one hypothesis at a time.
-- Provide a concise rationale (1-2 sentences).
-- Mark significant changes with <significant/> tag.
+You MUST make at least one change every iteration. Explore the codebase with your tools, then modify config or code:
 
-OUTPUT FORMAT:
-Use <edit> blocks for changes:
+1. **Explore first**: Use list_directory('.') to see project structure, read_file to examine configs and code.
 
-<edit>
-<path>relative/path/to/file</path>
-<search>
-exact text to find
-</search>
-<replace>
-replacement text
-</replace>
-</edit>
+2. **Make a change**: Modify something to improve the metric. Common targets:
+   - Training configs (YAML/JSON): learning rate, batch size, epochs, scheduler
+   - Model code: architecture tweaks, regularization, loss functions
+   - Data: augmentation, preprocessing settings
 
-For new files or full replacement, omit <search>:
+3. **Verify**: After writing, use run_command with `python -m py_compile <file>` to check syntax.
 
-<edit>
-<path>path/to/new/file</path>
-<replace>
-full file content
-</replace>
-</edit>
+## Important
 
-End with:
-<rationale>Your 1-2 sentence explanation</rationale>
+- You MUST propose a change each iteration—don't just observe
+- Always read a file before modifying it
+- Write complete file contents (not partial updates)
+- Test one hypothesis per iteration
+- Look for configs in common locations: config/, configs/, *.yaml, *.json
 
-If this is a key decision point, add:
-<significant/>
+## When you're done
 
-If you cannot propose any improvement, emit:
-<escalate/>
-<rationale>Explanation of why you cannot proceed</rationale>
+After making changes, respond with:
+
+RATIONALE: <1-2 sentence explanation of what you changed and why>
+SIGNIFICANT: <yes/no - is this a key decision point?>
+
+## If truly stuck
+
+Only if you've explored the codebase and genuinely cannot find anything to change:
+
+ESCALATE: <explanation of why you cannot proceed>
 """
-
-
-def build_context_section(
-    config: ContextConfig,
-    repo_root: Path,
-) -> str:
-    """Build the repository context section."""
-    sections = []
-
-    for file_path in config.include:
-        full_path = repo_root / file_path
-        if full_path.exists():
-            try:
-                content = full_path.read_text()
-                sections.append(f"<file path=\"{file_path}\">\n{content}\n</file>")
-            except Exception as e:
-                sections.append(f"<file path=\"{file_path}\" error=\"{e}\"/>")
-        else:
-            sections.append(f"<file path=\"{file_path}\" error=\"not found\"/>")
-
-    return "<repo_context>\n" + "\n\n".join(sections) + "\n</repo_context>"
 
 
 def build_history_section(summaries: list[RunSummary]) -> str:
     """Build the run history section."""
+    if not summaries:
+        return "<run_history>\nNo previous runs.\n</run_history>"
     return "<run_history>\n" + format_run_history(summaries) + "\n</run_history>"
 
 
@@ -91,26 +61,29 @@ def build_current_run_section(
     eval_result: EvalResult,
     primary_metric: str,
     baseline_value: float | None,
+    target_value: float | None = None,
+    minimize: bool = True,
 ) -> str:
     """Build the current run section."""
     lines = ["<current_run>"]
 
-    # Primary metric with comparison
     current_value = eval_result.metrics.get(primary_metric)
     if current_value is not None:
         lines.append(f"Primary metric ({primary_metric}): {current_value:.6f}")
+        if target_value is not None:
+            gap = abs(current_value - target_value)
+            direction = "below" if (minimize and current_value > target_value) or (not minimize and current_value < target_value) else "at/above"
+            lines.append(f"  Target: {target_value} (currently {gap:.3f} {'above' if minimize else 'below'} target)")
         if baseline_value is not None:
             delta = current_value - baseline_value
             pct = (delta / abs(baseline_value) * 100) if baseline_value != 0 else 0
             sign = "+" if delta > 0 else ""
             lines.append(f"  vs baseline: {sign}{delta:.6f} ({sign}{pct:.1f}%)")
 
-    # Other metrics
     lines.append("\nAll metrics:")
     for name, value in eval_result.metrics.items():
         lines.append(f"  {name}: {value:.6f}")
 
-    # Slices if present
     if eval_result.slices:
         lines.append("\nMetric slices:")
         for group_name, slices in eval_result.slices.items():
@@ -125,12 +98,15 @@ def build_current_run_section(
 
 def build_log_tail_section(log_tail: str, lines: int = 200) -> str:
     """Build the training log tail section."""
-    # Truncate to specified lines
     log_lines = log_tail.strip().split("\n")
     if len(log_lines) > lines:
         log_lines = log_lines[-lines:]
 
-    return f"<training_log_tail lines=\"{len(log_lines)}\">\n" + "\n".join(log_lines) + "\n</training_log_tail>"
+    return (
+        f"<training_log_tail lines=\"{len(log_lines)}\">\n"
+        + "\n".join(log_lines)
+        + "\n</training_log_tail>"
+    )
 
 
 def build_analysis_section(
@@ -141,12 +117,10 @@ def build_analysis_section(
     """Build the analysis section."""
     lines = ["<analysis>"]
 
-    # Metric change
     if metric_delta is not None:
-        direction = "improved" if metric_delta < 0 else "worsened"  # Assuming minimize
+        direction = "improved" if metric_delta < 0 else "worsened"
         lines.append(f"Metric change: {primary_metric} {direction} by {abs(metric_delta):.6f}")
 
-    # Guardrail results
     lines.append("\nGuardrail checks:")
     for result in guardrail_results:
         status = "TRIGGERED" if result.triggered else "OK"
@@ -156,81 +130,57 @@ def build_analysis_section(
     return "\n".join(lines)
 
 
-def build_bounds_section(bounds: ActionBoundsConfig) -> str:
-    """Build the action bounds section."""
-    lines = ["<action_bounds>"]
-
-    if bounds.allow:
-        lines.append("Allowed file patterns:")
-        for pattern in bounds.allow:
-            lines.append(f"  - {pattern}")
-
-    if bounds.deny:
-        lines.append("Denied file patterns (cannot modify):")
-        for pattern in bounds.deny:
-            lines.append(f"  - {pattern}")
-
-    if bounds.constraints:
-        lines.append("Constraints:")
-        for constraint in bounds.constraints:
-            lines.append(f"  - {constraint}")
-
-    lines.append("</action_bounds>")
+def build_constraints_section(constraints: list[str]) -> str:
+    """Build the constraints section."""
+    if not constraints:
+        return ""
+    lines = ["<constraints>"]
+    for constraint in constraints:
+        lines.append(f"  - {constraint}")
+    lines.append("</constraints>")
     return "\n".join(lines)
 
 
-def build_prompt(
-    config: RevisConfig,
-    repo_root: Path,
+def build_training_command_section(train_command: str) -> str:
+    """Build the training command section."""
+    return f"<training_command>\n{train_command}\n</training_command>"
+
+
+def build_iteration_context(
     run_summaries: list[RunSummary],
     eval_result: EvalResult,
+    primary_metric: str,
     baseline_value: float | None,
     log_tail: str,
+    log_tail_lines: int,
     guardrail_results: list[GuardrailResult],
     metric_delta: float | None,
-) -> list[dict]:
-    """Build the full prompt for the LLM."""
-    user_content_parts = [
-        build_context_section(config.context, repo_root),
+    constraints: list[str],
+    target_value: float | None = None,
+    minimize: bool = True,
+    train_command: str | None = None,
+) -> str:
+    """Build the iteration context for the agent.
+
+    This is passed as the user message to the agent. Unlike the old approach,
+    we don't stuff file contents here—the agent reads files on demand via tools.
+    """
+    sections = [
         build_history_section(run_summaries),
-        build_current_run_section(eval_result, config.metrics.primary, baseline_value),
-        build_log_tail_section(log_tail, config.context.log_tail_lines),
-        build_analysis_section(guardrail_results, metric_delta, config.metrics.primary),
-        build_bounds_section(config.action_bounds),
+        build_current_run_section(eval_result, primary_metric, baseline_value, target_value, minimize),
+        build_log_tail_section(log_tail, log_tail_lines),
+        build_analysis_section(guardrail_results, metric_delta, primary_metric),
     ]
 
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": "\n\n".join(user_content_parts)},
-    ]
+    if train_command:
+        sections.append(build_training_command_section(train_command))
 
+    if constraints:
+        sections.append(build_constraints_section(constraints))
 
-def build_fix_prompt(
-    error_message: str,
-    failed_action: str,
-    config: RevisConfig,
-    repo_root: Path,
-) -> list[dict]:
-    """Build prompt for fixing a failed action."""
-    context = build_context_section(config.context, repo_root)
+    sections.append(
+        "\nUse the available tools to explore the codebase and make improvements. "
+        "You MUST make at least one change. Start with list_directory('.') to see the project structure."
+    )
 
-    user_content = f"""The previous change failed with an error. Please fix it.
-
-{context}
-
-<failed_action>
-{failed_action}
-</failed_action>
-
-<error>
-{error_message}
-</error>
-
-Please provide a corrected version of the change that fixes this error.
-Use the same <edit> block format as before.
-"""
-
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
+    return "\n\n".join(sections)

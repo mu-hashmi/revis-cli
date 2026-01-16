@@ -73,12 +73,13 @@ class GuardrailsConfig(BaseModel):
 
 
 class ContextConfig(BaseModel):
-    """Context configuration for LLM."""
+    """Context configuration for LLM agent."""
 
-    include: list[str]
+    deny: list[str] = []  # Patterns to block from reading AND writing
+    constraints: list[str] = []  # Free-text constraints for the LLM
     history: int = 10
     log_tail_lines: int = 200
-    max_tokens: int = 50000
+    max_agent_iterations: int = 20
 
 
 class LLMConfig(BaseModel):
@@ -109,14 +110,6 @@ class GitHubConfig(BaseModel):
     auto_merge: AutoMergeConfig = AutoMergeConfig()
 
 
-class ActionBoundsConfig(BaseModel):
-    """Action bounds configuration."""
-
-    allow: list[str] = []
-    deny: list[str] = []
-    constraints: list[str] = []
-
-
 class RevisConfig(BaseModel):
     """Main Revis configuration."""
 
@@ -124,11 +117,10 @@ class RevisConfig(BaseModel):
     entry: EntryConfig
     metrics: MetricsConfig
     guardrails: GuardrailsConfig = GuardrailsConfig()
-    context: ContextConfig
+    context: ContextConfig = ContextConfig()
     llm: LLMConfig = LLMConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     github: GitHubConfig = GitHubConfig()
-    action_bounds: ActionBoundsConfig = ActionBoundsConfig()
 
 
 def parse_duration(duration_str: str) -> int:
@@ -202,12 +194,21 @@ guardrails:
   timeout_enabled: true
 
 context:
-  include:
-    - configs/train.yaml
-    - src/model.py
+  deny:
+    - ".git/**"
+    - "**/__pycache__/**"
+    - "*.pt"
+    - "*.ckpt"
+    - "*.safetensors"
+    - "wandb/**"
+    - ".revis/**"
+    - "node_modules/**"
+  constraints:
+    - "Learning rate must be between 1e-6 and 1e-2"
+    - "Batch size must be a power of 2"
   history: 10
   log_tail_lines: 200
-  max_tokens: 50000
+  max_agent_iterations: 20
 
 llm:
   model: claude-sonnet-4-20250514
@@ -222,15 +223,4 @@ github:
     enabled: false
     require_target_achieved: true
     # min_improvement_percent: 5.0
-
-action_bounds:
-  allow:
-    - configs/*.yaml
-    - src/**/*.py
-  deny:
-    - "*.lock"
-    - requirements.txt
-  constraints:
-    - "Learning rate must be between 1e-6 and 1e-2"
-    - "Batch size must be a power of 2"
 '''

@@ -33,6 +33,20 @@ class LLMResponse:
     used_fallback: bool
 
 
+@dataclass
+class LLMToolResponse:
+    """Response from LLM call with tool support."""
+
+    content: str
+    tool_calls: list[dict] | None
+    model_used: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_usd: float
+    used_fallback: bool
+
+
 class LLMClient:
     """LiteLLM client with auto-fallback and cost tracking."""
 
@@ -116,6 +130,104 @@ class LLMClient:
 
         # All models failed
         raise RuntimeError(f"All models failed. Last error: {last_error}")
+
+    def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+    ) -> LLMToolResponse:
+        """Make a completion request with tool support.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            tools: List of tool definitions in OpenAI format
+            max_tokens: Maximum tokens in response
+            temperature: Sampling temperature
+
+        Returns:
+            LLMToolResponse with content, tool_calls, and metadata
+        """
+        models_to_try = [self.config.model] + self.config.fallback
+        last_error = None
+
+        for i, model in enumerate(models_to_try):
+            is_fallback = i > 0
+            try:
+                response = completion(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+
+                usage = response.usage
+                prompt_tokens = usage.prompt_tokens or 0
+                completion_tokens = usage.completion_tokens or 0
+                total_tokens = prompt_tokens + completion_tokens
+
+                try:
+                    cost = litellm.completion_cost(completion_response=response)
+                    logger.debug(
+                        f"LiteLLM cost: ${cost:.6f} for {prompt_tokens} prompt + "
+                        f"{completion_tokens} completion tokens"
+                    )
+                except Exception as e:
+                    logger.debug(f"LiteLLM cost calc failed ({e}), using fallback")
+                    cost = self._estimate_cost(model, prompt_tokens, completion_tokens)
+
+                self.total_cost += cost
+                self.total_tokens += total_tokens
+                if is_fallback:
+                    self.fallback_used = True
+
+                message = response.choices[0].message
+                content = message.content or ""
+
+                tool_calls = None
+                if message.tool_calls:
+                    tool_calls = []
+                    for tc in message.tool_calls:
+                        tool_calls.append({
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "arguments": (
+                                tc.function.arguments
+                                if isinstance(tc.function.arguments, dict)
+                                else self._parse_json_safe(tc.function.arguments)
+                            ),
+                        })
+
+                if is_fallback:
+                    logger.info(f"Used fallback model {model} after primary failed")
+
+                return LLMToolResponse(
+                    content=content,
+                    tool_calls=tool_calls,
+                    model_used=model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    cost_usd=cost,
+                    used_fallback=is_fallback,
+                )
+
+            except (RateLimitError, APIConnectionError, ServiceUnavailableError, APIError) as e:
+                last_error = e
+                logger.warning(f"Model {model} failed: {e}. Trying next fallback...")
+                continue
+
+        raise RuntimeError(f"All models failed. Last error: {last_error}")
+
+    def _parse_json_safe(self, s: str) -> dict:
+        """Parse JSON string, returning empty dict on failure."""
+        try:
+            import json
+            return json.loads(s)
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     def _estimate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
         """Estimate cost when litellm can't calculate."""

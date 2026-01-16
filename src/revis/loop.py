@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta
 from pathlib import Path
 
 from revis.analyzer.compare import RunAnalyzer
@@ -15,9 +14,10 @@ from revis.executor.base import Executor
 from revis.executor.local import LocalConfig, LocalExecutor
 from revis.executor.ssh import SSHConfig, SSHExecutor
 from revis.github.pr import GitConfig, GitManager
-from revis.llm.actions import apply_action, parse_action, validate_action
+from revis.llm.agent import run_agent
 from revis.llm.client import LLMClient
-from revis.llm.prompts import build_fix_prompt, build_prompt
+from revis.llm.prompts import SYSTEM_PROMPT, build_iteration_context
+from revis.llm.tools import ToolExecutor
 from revis.store.sqlite import SQLiteRunStore
 from revis.types import Budget, Decision, Session, TerminationReason
 
@@ -120,6 +120,10 @@ class RevisLoop:
             minimize=config.metrics.minimize,
         )
         self.guardrails = GuardrailChecker(config.guardrails)
+        self.tool_executor = ToolExecutor(
+            repo_root=repo_path,
+            deny_patterns=config.context.deny,
+        )
 
     def _cleanup_active_process(self) -> None:
         """Kill any active training process."""
@@ -189,7 +193,6 @@ class RevisLoop:
     ) -> Session:
         """Inner loop logic."""
         iteration = session.iteration_count
-        last_action_str = ""
 
         while True:
             # Check stop signal
@@ -248,7 +251,6 @@ class RevisLoop:
 
             logger.info(f"Launching training: {train_cmd}")
             logger.info(f"Run output dir: {run_output_dir}")
-            run_start = time.time()
 
             try:
                 self.executor.launch(train_cmd, run_env, session_name)
@@ -262,10 +264,9 @@ class RevisLoop:
                 self.store.set_run_exit_code(run_id, result.exit_code)
 
             except Exception as e:
-                logger.error(f"Training failed: {e}")
+                logger.error(f"Training launch failed: {e}")
                 self.store.set_run_status(run_id, "failed")
 
-                # Decrement retry budget
                 session = self.store.get_session(session.id)
                 new_retry = session.retry_budget - 1
                 self.store.update_session_retry_budget(session.id, new_retry)
@@ -273,20 +274,16 @@ class RevisLoop:
                 if new_retry <= 0:
                     return self._terminate(session, TerminationReason.RETRY_EXHAUSTION, base_branch)
 
-                # Try to get LLM to fix
-                error_msg = str(e)
-                if last_action_str:
-                    messages = build_fix_prompt(error_msg, last_action_str, self.config, self.repo_path)
-                    response = self.llm.complete(messages)
-                    self.store.update_session_cost(session.id, self.llm.total_cost)
-
-                    action = parse_action(response.content)
-                    if action.type != "escalate" and action.edits:
-                        valid, err = validate_action(action, self.config.action_bounds)
-                        if valid:
-                            success, _ = apply_action(action, self.repo_path)
-                            if success:
-                                self.git.commit(f"Revis fix: {action.rationale}")
+                # Run agent to try to fix
+                error_context = f"Training launch failed with error:\n{e}\n\nPlease investigate and fix the issue."
+                agent_result = self._run_agent_for_fix(error_context, run_id)
+                if agent_result and agent_result.files_modified:
+                    sha = self.git.commit(f"Revis fix: {agent_result.rationale}")
+                    self.store.attach_decision(run_id, Decision(
+                        action_type="code_patch",
+                        rationale=agent_result.rationale,
+                        commit_sha=sha,
+                    ))
                 continue
 
             # Handle run failure
@@ -301,35 +298,23 @@ class RevisLoop:
                 if new_retry <= 0:
                     return self._terminate(session, TerminationReason.RETRY_EXHAUSTION, base_branch)
 
-                # Get error from logs and ask LLM to fix
+                # Get error from logs and run agent to fix
                 log_tail = self.executor.get_log_tail(
                     f"{run_output_dir}/train.log",
                     self.config.context.log_tail_lines,
                 )
-                error_msg = f"Training failed with exit code {result.exit_code}\n\nLog tail:\n{log_tail}"
-
-                if last_action_str:
-                    messages = build_fix_prompt(error_msg, last_action_str, self.config, self.repo_path)
-                    response = self.llm.complete(messages)
-                    self.store.update_session_cost(session.id, self.llm.total_cost)
-
-                    action = parse_action(response.content)
-                    last_action_str = response.content
-
-                    if action.type == "escalate":
+                error_context = f"Training failed with exit code {result.exit_code}\n\nLog tail:\n{log_tail}\n\nPlease investigate and fix the issue."
+                agent_result = self._run_agent_for_fix(error_context, run_id)
+                if agent_result:
+                    if agent_result.escalate:
                         return self._terminate(session, TerminationReason.LLM_ESCALATION, base_branch)
-
-                    if action.edits:
-                        valid, err = validate_action(action, self.config.action_bounds)
-                        if valid:
-                            success, apply_err = apply_action(action, self.repo_path)
-                            if success:
-                                sha = self.git.commit(f"Revis fix: {action.rationale}")
-                                self.store.attach_decision(run_id, Decision(
-                                    action_type="code_patch",
-                                    rationale=action.rationale,
-                                    commit_sha=sha,
-                                ))
+                    if agent_result.files_modified:
+                        sha = self.git.commit(f"Revis fix: {agent_result.rationale}")
+                        self.store.attach_decision(run_id, Decision(
+                            action_type="code_patch",
+                            rationale=agent_result.rationale,
+                            commit_sha=sha,
+                        ))
                 continue
 
             self.store.set_run_status(run_id, "completed")
@@ -383,11 +368,10 @@ class RevisLoop:
             if self.guardrails.has_critical_violation(guardrail_results):
                 violations = self.guardrails.get_violations(guardrail_results)
                 logger.warning(f"Critical guardrail violations: {[v.message for v in violations]}")
-                # Don't terminate on guardrails - let LLM try to fix
 
             # Check plateau
-            for result in guardrail_results:
-                if result.guardrail == "plateau_detection" and result.triggered:
+            for gr in guardrail_results:
+                if gr.guardrail == "plateau_detection" and gr.triggered:
                     logger.info("Plateau detected")
                     return self._terminate(session, TerminationReason.PLATEAU, base_branch)
 
@@ -405,7 +389,9 @@ class RevisLoop:
             analysis = self.analyzer.analyze_run(session, eval_result, prev_eval)
 
             # Get run summaries for context
-            run_summaries = self.analyzer.summarize_runs_for_context(session.id, self.config.context.history)
+            run_summaries = self.analyzer.summarize_runs_for_context(
+                session.id, self.config.context.history
+            )
 
             # Get baseline value
             baseline_value = initial_value
@@ -416,81 +402,60 @@ class RevisLoop:
                 self.config.context.log_tail_lines,
             )
 
-            # Build prompt and get LLM response
-            logger.info("Generating next action with LLM...")
-            messages = build_prompt(
-                config=self.config,
-                repo_root=self.repo_path,
+            # Build iteration context and run agent
+            logger.info("Running agent to propose improvements...")
+
+            # Reset tool executor's file tracking for this iteration
+            self.tool_executor.files_modified = []
+
+            task = build_iteration_context(
                 run_summaries=run_summaries,
                 eval_result=eval_result,
+                primary_metric=self.config.metrics.primary,
                 baseline_value=baseline_value,
                 log_tail=log_tail,
+                log_tail_lines=self.config.context.log_tail_lines,
                 guardrail_results=guardrail_results,
                 metric_delta=analysis.metric_delta,
+                constraints=self.config.context.constraints,
+                target_value=self.config.metrics.target,
+                minimize=self.config.metrics.minimize,
+                train_command=self.config.entry.train,
             )
 
-            response = self.llm.complete(messages)
+            agent_result = run_agent(
+                task=task,
+                system_prompt=SYSTEM_PROMPT,
+                executor=self.tool_executor,
+                client=self.llm,
+                max_iterations=self.config.context.max_agent_iterations,
+            )
             self.store.update_session_cost(session.id, self.llm.total_cost)
-            logger.info(f"LLM response received (cost so far: ${self.llm.total_cost:.2f})")
-
-            # Parse action
-            action = parse_action(response.content)
-            last_action_str = response.content
+            logger.info(f"Agent finished (cost so far: ${self.llm.total_cost:.2f})")
 
             # Handle escalation
-            if action.type == "escalate":
-                logger.info("LLM requested escalation")
+            if agent_result.escalate:
+                logger.info(f"Agent escalated: {agent_result.escalate_reason}")
                 return self._terminate(session, TerminationReason.LLM_ESCALATION, base_branch)
 
-            # Handle no edits (plateau)
-            if not action.edits:
-                logger.info("LLM proposed no changes - treating as plateau")
+            # Handle no changes (plateau)
+            if not agent_result.files_modified:
+                logger.info("Agent proposed no changes - treating as plateau")
                 return self._terminate(session, TerminationReason.PLATEAU, base_branch)
 
-            # Validate action
-            valid, err = validate_action(action, self.config.action_bounds)
-            if not valid:
-                logger.warning(f"Action validation failed: {err}")
-                # Ask LLM to fix
-                messages = build_fix_prompt(err, response.content, self.config, self.repo_path)
-                response = self.llm.complete(messages)
-                action = parse_action(response.content)
-                last_action_str = response.content
-
-                if action.type == "escalate" or not action.edits:
-                    return self._terminate(session, TerminationReason.PLATEAU, base_branch)
-
-            # Apply action
-            logger.info(f"Applying {len(action.edits)} edit(s)...")
-            success, apply_err = apply_action(action, self.repo_path)
-
-            if not success:
-                logger.warning(f"Action apply failed: {apply_err}")
-                # Ask LLM to fix
-                messages = build_fix_prompt(apply_err, response.content, self.config, self.repo_path)
-                response = self.llm.complete(messages)
-                action = parse_action(response.content)
-
-                if action.type == "escalate" or not action.edits:
-                    return self._terminate(session, TerminationReason.PLATEAU, base_branch)
-
-                success, _ = apply_action(action, self.repo_path)
-                if not success:
-                    continue  # Let retry logic handle
-
-            # Commit changes (local only - push happens on export)
-            commit_msg = f"Revis iteration {iteration}: {action.rationale}"
+            # Commit changes (files already written by agent)
+            commit_msg = f"Revis iteration {iteration}: {agent_result.rationale}"
             sha = self.git.commit(commit_msg)
             self.store.set_run_commit(run_id, sha)
 
             # Record decision
             self.store.attach_decision(run_id, Decision(
                 action_type="code_patch",
-                rationale=action.rationale,
+                rationale=agent_result.rationale,
                 commit_sha=sha,
             ))
 
-            logger.info(f"Committed {sha[:7]}: {action.rationale}")
+            logger.info(f"Committed {sha[:7]}: {agent_result.rationale}")
 
             # Update budget for runs
             if budget.type == "runs":
@@ -498,6 +463,37 @@ class RevisLoop:
 
             # Refresh session
             session = self.store.get_session(session.id)
+
+    def _run_agent_for_fix(self, error_context: str, run_id: str):
+        """Run agent to fix an error."""
+        logger.info("Running agent to fix error...")
+        self.tool_executor.files_modified = []
+
+        task = f"""The training run failed. Here's the error:
+
+{error_context}
+
+Please use the available tools to:
+1. Read relevant files to understand the issue
+2. Fix the problem
+3. Verify your fix with syntax checking
+
+When done, provide:
+RATIONALE: <what you fixed and why>
+"""
+
+        agent_result = run_agent(
+            task=task,
+            system_prompt=SYSTEM_PROMPT,
+            executor=self.tool_executor,
+            client=self.llm,
+            max_iterations=self.config.context.max_agent_iterations,
+        )
+        self.store.update_session_cost(
+            self.store.query_runs(run_id=run_id)[0].session_id if run_id else "",
+            self.llm.total_cost,
+        )
+        return agent_result
 
     def _terminate(
         self,

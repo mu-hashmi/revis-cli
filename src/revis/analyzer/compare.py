@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from revis.store.sqlite import SQLiteRunStore
-from revis.types import Analysis, EvalResult, Run, Session
+from revis.types import Analysis, EvalResult, Session
 
 
 @dataclass

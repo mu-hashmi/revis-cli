@@ -4,7 +4,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -99,7 +98,7 @@ def init():
         gitignore.write_text(f"# Revis\n{REVIS_DIR}/\n")
         console.print(f"Created .gitignore with {REVIS_DIR}/")
 
-    console.print(f"[green]Initialized Revis.[/green]")
+    console.print("[green]Initialized Revis.[/green]")
     console.print(f"  Config: {CONFIG_FILE}")
     console.print(f"  Database: {DB_FILE}")
     console.print(f"\nEdit {CONFIG_FILE} to configure your training setup.")
@@ -222,15 +221,15 @@ def loop(
             check=True,
         )
 
-        console.print(f"[green]Revis loop started in background[/green]")
+        console.print("[green]Revis loop started in background[/green]")
         console.print(f"  Session: {name}")
         console.print(f"  Budget: {budget} ({budget_type})")
         console.print()
         console.print("[bold]Commands:[/bold]")
         console.print(f"  revis watch {name}    - attach to live output")
         console.print(f"  revis logs {name}     - show recent output")
-        console.print(f"  revis status         - check session status")
-        console.print(f"  revis stop           - stop the loop")
+        console.print("  revis status         - check session status")
+        console.print("  revis stop           - stop the loop")
         return
 
     setup_logging(verbose)
@@ -354,8 +353,8 @@ def watch(
     tmux_name = get_tmux_session_name(name)
     if not tmux_session_exists(tmux_name):
         console.print(f"[red]Error:[/red] No tmux session '{tmux_name}' found.")
-        console.print(f"The loop may not be running in background mode, or has already finished.")
-        console.print(f"\nCheck 'revis status' or 'revis list' for session info.")
+        console.print("The loop may not be running in background mode, or has already finished.")
+        console.print("\nCheck 'revis status' or 'revis list' for session info.")
         raise typer.Exit(1)
 
     # Attach to tmux session (replaces current process)
@@ -376,7 +375,7 @@ def logs(
     tmux_name = get_tmux_session_name(name)
     if not tmux_session_exists(tmux_name):
         console.print(f"[red]Error:[/red] No tmux session '{tmux_name}' found.")
-        console.print(f"The loop may not be running in background mode, or has already finished.")
+        console.print("The loop may not be running in background mode, or has already finished.")
         raise typer.Exit(1)
 
     if follow:
@@ -486,7 +485,7 @@ def show(
         console.print(f"  Termination: {session.termination_reason.value}")
 
     # Times
-    console.print(f"\n[bold]Timeline:[/bold]")
+    console.print("\n[bold]Timeline:[/bold]")
     console.print(f"  Started: {session.started_at}")
     if session.ended_at:
         console.print(f"  Ended: {session.ended_at}")
@@ -498,7 +497,7 @@ def show(
             console.print(f"  PR: {session.pr_url}")
 
     # Budget
-    console.print(f"\n[bold]Budget:[/bold]")
+    console.print("\n[bold]Budget:[/bold]")
     if session.budget.type == "time":
         console.print(f"  Time: {format_duration(session.budget.used)} / {format_duration(session.budget.value)}")
     else:
@@ -566,7 +565,7 @@ def export(
         raise typer.Exit(1)
 
     if session.status == "running":
-        console.print(f"[red]Error:[/red] Cannot export running session. Stop it first with 'revis stop'.")
+        console.print("[red]Error:[/red] Cannot export running session. Stop it first with 'revis stop'.")
         raise typer.Exit(1)
 
     if session.exported_at and not force:
@@ -580,8 +579,8 @@ def export(
     config_path = Path(CONFIG_FILE)
     config = load_config(config_path)
 
-    from revis.github.pr import GitConfig, GitHubManager, GitManager, format_pr_body
     from revis.analyzer.compare import RunAnalyzer
+    from revis.github.pr import GitConfig, GitHubManager, GitManager, format_pr_body
 
     repo_path = Path.cwd()
     git = GitManager(GitConfig(repo_path=repo_path))
