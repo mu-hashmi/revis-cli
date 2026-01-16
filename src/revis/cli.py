@@ -721,7 +721,7 @@ def delete(
                     console.print(f"  [yellow]Warning:[/yellow] Could not delete branch: {e}")
 
         # Delete from database
-        store.delete_session(session.id)
+        store.delete_session(session.id, force=force)
         console.print(f"[green]Deleted session:[/green] {session.name}")
 
 

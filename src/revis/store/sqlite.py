@@ -155,12 +155,12 @@ class SQLiteRunStore:
         rows = self.conn.execute(query, params).fetchall()
         return [self._row_to_session(row) for row in rows]
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, force: bool = False) -> bool:
         session = self.get_session(session_id)
         if session is None:
             return False
-        if session.status == "running":
-            raise ValueError("Cannot delete running session")
+        if session.status == "running" and not force:
+            raise ValueError("Cannot delete running session (use --force)")
 
         runs = self.query_runs(session_id=session_id, limit=1000)
         run_ids = [r.id for r in runs]

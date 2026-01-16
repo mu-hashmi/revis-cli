@@ -49,8 +49,13 @@ class RunStore(Protocol):
         """List all sessions, optionally filtered by status."""
         ...
 
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a session and all related data. Returns True if deleted."""
+    def delete_session(self, session_id: str, force: bool = False) -> bool:
+        """Delete a session and all related data. Returns True if deleted.
+
+        Args:
+            session_id: Session ID to delete
+            force: If True, allow deleting running sessions
+        """
         ...
 
     def mark_session_exported(self, session_id: str, pr_url: str | None) -> None:
