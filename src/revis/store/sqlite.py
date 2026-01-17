@@ -48,16 +48,23 @@ class SQLiteRunStore:
 
     def _migrate(self) -> None:
         """Run migrations for existing databases."""
-        cursor = self.conn.execute("PRAGMA table_info(sessions)")
+        # Check if sessions table exists first
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+        )
+        if not cursor.fetchone():
+            return  # Table doesn't exist yet, skip migrations
+
+        cursor = self._conn.execute("PRAGMA table_info(sessions)")
         columns = [row[1] for row in cursor.fetchall()]
 
         if "name" not in columns:
-            self.conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT UNIQUE")
-            self.conn.execute("ALTER TABLE sessions ADD COLUMN exported_at TIMESTAMP")
-            self.conn.execute(
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT UNIQUE")
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN exported_at TIMESTAMP")
+            self._conn.execute(
                 "UPDATE sessions SET name = 'session-' || id WHERE name IS NULL"
             )
-            self.conn.commit()
+            self._conn.commit()
 
         # Add traces table if it doesn't exist
         self.conn.execute("""
