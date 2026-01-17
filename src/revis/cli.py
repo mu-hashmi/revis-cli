@@ -36,14 +36,35 @@ def tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
-def setup_logging(verbose: bool = False):
-    """Configure logging with rich handler."""
+def setup_logging(verbose: bool = False, session_name: str | None = None):
+    """Configure logging with rich handler and optional file output.
+
+    If session_name is provided, also logs to .revis/logs/<session_name>.log
+    """
     level = logging.DEBUG if verbose else logging.INFO
+    handlers: list[logging.Handler] = [
+        RichHandler(console=console, rich_tracebacks=True)
+    ]
+
+    # Add file handler for session logs
+    if session_name:
+        log_dir = Path(".revis/logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{session_name}.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)  # Always capture debug in file
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        handlers.append(file_handler)
+
     logging.basicConfig(
         level=level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler(console=console, rich_tracebacks=True)],
+        handlers=handlers,
+        force=True,  # Override any existing config
     )
     logging.getLogger("paramiko").setLevel(logging.WARNING)
     logging.getLogger("litellm").setLevel(logging.WARNING)
@@ -232,7 +253,7 @@ def loop(
         console.print("  revis stop           - stop the loop")
         return
 
-    setup_logging(verbose)
+    setup_logging(verbose, session_name=name)
     store = get_store()
 
     # Validate name
@@ -277,7 +298,7 @@ def loop(
     from revis.loop import run_loop
 
     try:
-        session = run_loop(config, name, budget_obj, baseline)
+        session = run_loop(config, name, budget_obj, console, baseline)
         console.print(f"\n[green]Session completed:[/green] {session.termination_reason}")
         console.print(f"\nTo export: revis export {name}")
     except KeyboardInterrupt:
@@ -316,7 +337,7 @@ def resume(
 
     from revis.loop import resume_loop
 
-    session = resume_loop(config, session)
+    session = resume_loop(config, session, console)
     console.print(f"\n[green]Session completed:[/green] {session.termination_reason}")
     console.print(f"\nTo export: revis export {name}")
 
@@ -367,19 +388,42 @@ def logs(
     lines: int = typer.Option(50, "--lines", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow output (like tail -f)"),
 ):
-    """Show recent output from a background loop."""
+    """Show recent output from a session (from log file or tmux)."""
+    log_file = Path(f".revis/logs/{name}.log")
+    tmux_name = get_tmux_session_name(name)
+    tmux_running = shutil.which("tmux") and tmux_session_exists(tmux_name)
+
+    # Prefer log file (persists after session ends)
+    if log_file.exists():
+        if follow:
+            # Use tail -f on the log file
+            try:
+                os.execvp("tail", ["tail", "-f", "-n", str(lines), str(log_file)])
+            except KeyboardInterrupt:
+                pass
+        else:
+            # Show last N lines
+            content = log_file.read_text()
+            log_lines = content.strip().split("\n")
+            for line in log_lines[-lines:]:
+                console.print(line)
+            if tmux_running:
+                console.print(f"\n[dim]Use 'revis watch {name}' to attach live, or 'revis logs {name} -f' to follow[/dim]")
+            else:
+                console.print(f"\n[dim]Session finished. Showing last {min(lines, len(log_lines))} lines from log file.[/dim]")
+        return
+
+    # Fall back to tmux if log file doesn't exist
     if not shutil.which("tmux"):
-        console.print("[red]Error:[/red] tmux not installed.")
+        console.print(f"[red]Error:[/red] No log file found at {log_file}")
         raise typer.Exit(1)
 
-    tmux_name = get_tmux_session_name(name)
-    if not tmux_session_exists(tmux_name):
-        console.print(f"[red]Error:[/red] No tmux session '{tmux_name}' found.")
-        console.print("The loop may not be running in background mode, or has already finished.")
+    if not tmux_running:
+        console.print(f"[red]Error:[/red] No log file '{log_file}' and no tmux session '{tmux_name}' found.")
+        console.print("The session may not have started, or logs were not captured.")
         raise typer.Exit(1)
 
     if follow:
-        # Use watch to refresh every second
         try:
             while True:
                 os.system("clear")
@@ -394,7 +438,6 @@ def logs(
         except KeyboardInterrupt:
             pass
     else:
-        # One-shot capture
         result = subprocess.run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
             capture_output=True,
@@ -467,6 +510,7 @@ def list_sessions(
 @app.command()
 def show(
     name: str = typer.Argument(..., help="Session name to show"),
+    trace: bool = typer.Option(False, "--trace", "-t", help="Show agent tool call traces"),
 ):
     """Show detailed information about a session."""
     store = get_store()
@@ -505,49 +549,111 @@ def show(
     console.print(f"  LLM Cost: ${session.llm_cost_usd:.2f}")
     console.print(f"  Retries Remaining: {session.retry_budget}")
 
-    # Runs table
     runs = store.query_runs(session_id=session.id, limit=50)
-    if runs:
-        console.print(f"\n[bold]Iterations ({session.iteration_count}):[/bold]")
+    if not runs:
+        return
 
-        table = Table()
-        table.add_column("#", justify="right")
-        table.add_column("Status")
-        table.add_column("Metrics")
-        table.add_column("Change")
-        table.add_column("Duration")
+    if trace:
+        _show_traces(store, runs)
+    else:
+        _show_runs_table(store, runs, session.iteration_count)
 
-        for run in reversed(runs):
-            metrics = store.get_run_metrics(run.id)
-            metrics_str = ", ".join(f"{m.name}={m.value:.4f}" for m in metrics[:3])
-            if not metrics_str:
-                metrics_str = "N/A"
 
-            decisions = store.get_decisions(run.id)
-            if decisions:
-                rationale = decisions[0].rationale
-                change_str = rationale[:40] + "..." if len(rationale) > 40 else rationale
-            else:
-                change_str = "Initial"
+def _show_runs_table(store, runs: list, iteration_count: int) -> None:
+    """Show runs as a summary table."""
+    console.print(f"\n[bold]Iterations ({iteration_count}):[/bold]")
 
-            duration_str = ""
-            if run.started_at and run.ended_at:
-                secs = (run.ended_at - run.started_at).total_seconds()
-                duration_str = format_duration(int(secs))
-            elif run.started_at:
-                duration_str = "running..."
+    table = Table()
+    table.add_column("#", justify="right")
+    table.add_column("Status")
+    table.add_column("Metrics")
+    table.add_column("Change")
+    table.add_column("Duration")
 
-            status_style = {"completed": "green", "failed": "red", "running": "yellow"}.get(run.status, "white")
+    for run in reversed(runs):
+        metrics = store.get_run_metrics(run.id)
+        metrics_str = ", ".join(f"{m.name}={m.value:.4f}" for m in metrics[:3])
+        if not metrics_str:
+            metrics_str = "N/A"
 
-            table.add_row(
-                str(run.iteration_number),
-                f"[{status_style}]{run.status}[/{status_style}]",
-                metrics_str,
-                change_str,
-                duration_str,
-            )
+        decisions = store.get_decisions(run.id)
+        if decisions:
+            rationale = decisions[0].rationale
+            change_str = rationale[:40] + "..." if len(rationale) > 40 else rationale
+        else:
+            change_str = "Initial"
 
-        console.print(table)
+        duration_str = ""
+        if run.started_at and run.ended_at:
+            secs = (run.ended_at - run.started_at).total_seconds()
+            duration_str = format_duration(int(secs))
+        elif run.started_at:
+            duration_str = "running..."
+
+        status_style = {"completed": "green", "failed": "red", "running": "yellow"}.get(run.status, "white")
+
+        table.add_row(
+            str(run.iteration_number),
+            f"[{status_style}]{run.status}[/{status_style}]",
+            metrics_str,
+            change_str,
+            duration_str,
+        )
+
+    console.print(table)
+
+
+def _show_traces(store, runs: list) -> None:
+    """Show agent tool call traces for each run."""
+    for run in reversed(runs):
+        console.print(f"\n[bold]─── Iteration {run.iteration_number} ───[/bold]")
+
+        traces = store.get_traces(run.id)
+        if not traces:
+            console.print("  [dim]No traces recorded[/dim]")
+            continue
+
+        for trace in traces:
+            event_type = trace["event_type"]
+            data = trace["data"]
+
+            if event_type == "tool_call":
+                tool = data.get("tool", "?")
+                args = data.get("args", {})
+                console.print(f"[dim]→[/dim] [cyan]{tool}[/cyan]", end="")
+                _print_trace_args(tool, args)
+            # Skip tool_result - they're interleaved and make output noisy
+
+        decisions = store.get_decisions(run.id)
+        if decisions:
+            rationale = decisions[0].rationale
+            console.print(f"[green]Rationale:[/green] {rationale}")
+
+
+def _print_trace_args(tool: str, args: dict) -> None:
+    """Format tool arguments for trace display."""
+    if tool == "read_file":
+        console.print(f"([yellow]{args.get('path', '?')}[/yellow])")
+    elif tool == "write_file":
+        path = args.get("path", "?")
+        content = args.get("content", "")
+        console.print(f"([yellow]{path}[/yellow]) [dim]{len(content)} bytes[/dim]")
+    elif tool == "search_codebase":
+        console.print(f"([yellow]{args.get('pattern', '?')}[/yellow])")
+    elif tool == "find_definition":
+        console.print(f"([yellow]{args.get('name', '?')}[/yellow])")
+    elif tool == "list_directory":
+        path = args.get("path", ".")
+        recursive = args.get("recursive", False)
+        suffix = " [dim]recursive[/dim]" if recursive else ""
+        console.print(f"([yellow]{path}[/yellow]){suffix}")
+    elif tool == "run_command":
+        cmd = args.get("command", "?")
+        if len(cmd) > 50:
+            cmd = cmd[:47] + "..."
+        console.print(f"([yellow]{cmd}[/yellow])")
+    else:
+        console.print(f"({args})")
 
 
 @app.command()

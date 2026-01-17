@@ -30,6 +30,7 @@ class SQLiteRunStore:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path))
             self._conn.row_factory = sqlite3.Row
+            self._migrate()  # Run migrations on first connection
         return self._conn
 
     def initialize(self) -> None:
@@ -57,6 +58,19 @@ class SQLiteRunStore:
                 "UPDATE sessions SET name = 'session-' || id WHERE name IS NULL"
             )
             self.conn.commit()
+
+        # Add traces table if it doesn't exist
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS traces (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                timestamp TEXT DEFAULT (datetime('now')),
+                event_type TEXT NOT NULL,
+                data_json TEXT NOT NULL
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_run ON traces(run_id)")
+        self.conn.commit()
 
     # Session management
 
@@ -166,6 +180,7 @@ class SQLiteRunStore:
         run_ids = [r.id for r in runs]
 
         for run_id in run_ids:
+            self.conn.execute("DELETE FROM traces WHERE run_id = ?", (run_id,))
             self.conn.execute("DELETE FROM decisions WHERE run_id = ?", (run_id,))
             self.conn.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
             self.conn.execute("DELETE FROM metrics WHERE run_id = ?", (run_id,))
@@ -464,5 +479,25 @@ class SQLiteRunStore:
                 rationale=row["rationale"],
                 commit_sha=row["commit_sha"],
             )
+            for row in rows
+        ]
+
+    # Trace logging
+
+    def log_trace(self, run_id: str, event_type: str, data: dict) -> None:
+        trace_id = str(uuid.uuid4())[:8]
+        self.conn.execute(
+            "INSERT INTO traces (id, run_id, event_type, data_json) VALUES (?, ?, ?, ?)",
+            (trace_id, run_id, event_type, json.dumps(data)),
+        )
+        self.conn.commit()
+
+    def get_traces(self, run_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT timestamp, event_type, data_json FROM traces WHERE run_id = ? ORDER BY timestamp",
+            (run_id,),
+        ).fetchall()
+        return [
+            {"timestamp": row[0], "event_type": row[1], "data": json.loads(row[2])}
             for row in rows
         ]

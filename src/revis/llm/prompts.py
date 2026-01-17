@@ -1,8 +1,12 @@
 """Prompt construction for LLM agent."""
 
+import logging
+
 from revis.analyzer.compare import RunSummary, format_run_history
 from revis.analyzer.detectors import GuardrailResult
 from revis.types import EvalResult
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are Revis, an autonomous ML training optimizer. Your job is to analyze training results and propose changes to improve model metrics.
 
@@ -151,8 +155,6 @@ def build_iteration_context(
     eval_result: EvalResult,
     primary_metric: str,
     baseline_value: float | None,
-    log_tail: str,
-    log_tail_lines: int,
     guardrail_results: list[GuardrailResult],
     metric_delta: float | None,
     constraints: list[str],
@@ -164,13 +166,15 @@ def build_iteration_context(
 
     This is passed as the user message to the agent. Unlike the old approach,
     we don't stuff file contents here—the agent reads files on demand via tools.
+    Training logs are available via the get_training_logs tool.
     """
-    sections = [
-        build_history_section(run_summaries),
-        build_current_run_section(eval_result, primary_metric, baseline_value, target_value, minimize),
-        build_log_tail_section(log_tail, log_tail_lines),
-        build_analysis_section(guardrail_results, metric_delta, primary_metric),
-    ]
+    history_section = build_history_section(run_summaries)
+    current_run_section = build_current_run_section(eval_result, primary_metric, baseline_value, target_value, minimize)
+    analysis_section = build_analysis_section(guardrail_results, metric_delta, primary_metric)
+
+    logger.debug(f"Context section sizes: history={len(history_section)}, current_run={len(current_run_section)}, analysis={len(analysis_section)}")
+
+    sections = [history_section, current_run_section, analysis_section]
 
     if train_command:
         sections.append(build_training_command_section(train_command))
@@ -180,7 +184,10 @@ def build_iteration_context(
 
     sections.append(
         "\nUse the available tools to explore the codebase and make improvements. "
-        "You MUST make at least one change. Start with list_directory('.') to see the project structure."
+        "You MUST make at least one change. Start with list_directory('.') to see the project structure. "
+        "Use get_training_logs if you need to see training output or debug issues."
     )
 
-    return "\n\n".join(sections)
+    result = "\n\n".join(sections)
+    logger.info(f"Total iteration context size: {len(result)} chars")
+    return result

@@ -74,9 +74,19 @@ CREATE TABLE IF NOT EXISTS decisions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Traces (agent tool calls and results)
+CREATE TABLE IF NOT EXISTS traces (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    timestamp TEXT DEFAULT (datetime('now')),
+    event_type TEXT NOT NULL,  -- tool_call, tool_result
+    data_json TEXT NOT NULL
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_metrics_run ON metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name);
+CREATE INDEX IF NOT EXISTS idx_traces_run ON traces(run_id);

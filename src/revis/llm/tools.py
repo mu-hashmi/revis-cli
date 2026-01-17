@@ -1,9 +1,15 @@
 """Tool definitions and executor for agentic file editing."""
 
+from __future__ import annotations
+
 import re
 import subprocess
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from revis.executor.base import Executor
 
 TOOLS = [
     {
@@ -132,16 +138,42 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_training_logs",
+            "description": "Get training logs from the current run. Use this to understand training dynamics, debug errors, or see loss progression. Returns sanitized logs with ANSI codes stripped.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "enum": ["all", "errors", "metrics"],
+                        "description": "Filter log type. 'all' = last 200 lines. 'errors' = only ERROR/WARNING/Exception lines. 'metrics' = lines containing loss/accuracy/epoch info.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
 class ToolExecutor:
     """Execute tools for agentic file editing."""
 
-    def __init__(self, repo_root: Path, deny_patterns: list[str]):
+    def __init__(
+        self,
+        repo_root: Path,
+        deny_patterns: list[str],
+        executor: Executor | None = None,
+        run_output_dir: str | None = None,
+    ):
         self.repo_root = repo_root
         self.deny_patterns = deny_patterns
         self.files_modified: list[str] = []
+        self._executor = executor
+        self._run_output_dir = run_output_dir
 
     def is_denied(self, path: str) -> bool:
         """Check if path matches any deny pattern."""
@@ -314,3 +346,43 @@ class ToolExecutor:
             return output.strip() if output.strip() else "(no output)"
         except subprocess.TimeoutExpired:
             return f"Command timed out after {timeout}s"
+
+    def tool_get_training_logs(self, filter: str = "all") -> str:
+        """Get training logs with optional filtering."""
+        if self._executor is None or self._run_output_dir is None:
+            return "Training logs not available (no active run)"
+
+        log_path = f"{self._run_output_dir}/train.log"
+        log_content = self._executor.get_log_tail(log_path, lines=500)
+
+        if not log_content.strip():
+            return "(no training logs found)"
+
+        # Strip ANSI escape codes
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        log_content = ansi_escape.sub('', log_content)
+
+        lines = log_content.strip().split("\n")
+
+        if filter == "errors":
+            patterns = ["error", "warning", "exception", "traceback", "failed", "oom", "nan", "cuda"]
+            lines = [l for l in lines if any(p in l.lower() for p in patterns)]
+        elif filter == "metrics":
+            patterns = ["loss", "accuracy", "acc", "epoch", "step", "lr=", "learning_rate", "val_", "train_"]
+            lines = [l for l in lines if any(p in l.lower() for p in patterns)]
+            # Deduplicate similar lines for long training
+            if len(lines) > 50:
+                step = len(lines) // 50
+                lines = lines[::step]
+
+        # Limit output
+        if len(lines) > 200:
+            lines = lines[-200:]
+
+        result = "\n".join(lines)
+
+        # Cap total size
+        if len(result) > 30000:
+            result = result[-30000:]
+
+        return result if result.strip() else "(no matching log lines)"

@@ -6,6 +6,8 @@ import os
 import time
 from pathlib import Path
 
+from rich.console import Console
+
 from revis.analyzer.compare import RunAnalyzer
 from revis.analyzer.detectors import GuardrailChecker
 from revis.config import RevisConfig, parse_duration
@@ -18,6 +20,7 @@ from revis.llm.agent import run_agent
 from revis.llm.client import LLMClient
 from revis.llm.prompts import SYSTEM_PROMPT, build_iteration_context
 from revis.llm.tools import ToolExecutor
+from revis.llm.tracer import AgentTracer
 from revis.store.sqlite import SQLiteRunStore
 from revis.types import Budget, Decision, Session, TerminationReason
 
@@ -89,10 +92,12 @@ class RevisLoop:
         config: RevisConfig,
         store: SQLiteRunStore,
         repo_path: Path,
+        console: Console,
     ):
         self.config = config
         self.store = store
         self.repo_path = repo_path
+        self.console = console
 
         # Track active training process for cleanup
         self._active_process_id: str | None = None
@@ -124,6 +129,10 @@ class RevisLoop:
             repo_root=repo_path,
             deny_patterns=config.context.deny,
         )
+
+    def _create_tracer(self, run_id: str) -> AgentTracer:
+        """Create an AgentTracer for the given run."""
+        return AgentTracer(console=self.console, backend=self.store, run_id=run_id)
 
     def _cleanup_active_process(self) -> None:
         """Kill any active training process."""
@@ -396,25 +405,19 @@ class RevisLoop:
             # Get baseline value
             baseline_value = initial_value
 
-            # Get log tail from run output directory
-            log_tail = self.executor.get_log_tail(
-                f"{run_output_dir}/train.log",
-                self.config.context.log_tail_lines,
-            )
-
             # Build iteration context and run agent
             logger.info("Running agent to propose improvements...")
 
-            # Reset tool executor's file tracking for this iteration
+            # Reset tool executor's file tracking and set run context for log access
             self.tool_executor.files_modified = []
+            self.tool_executor._executor = self.executor
+            self.tool_executor._run_output_dir = run_output_dir
 
             task = build_iteration_context(
                 run_summaries=run_summaries,
                 eval_result=eval_result,
                 primary_metric=self.config.metrics.primary,
                 baseline_value=baseline_value,
-                log_tail=log_tail,
-                log_tail_lines=self.config.context.log_tail_lines,
                 guardrail_results=guardrail_results,
                 metric_delta=analysis.metric_delta,
                 constraints=self.config.context.constraints,
@@ -423,13 +426,16 @@ class RevisLoop:
                 train_command=self.config.entry.train,
             )
 
+            tracer = self._create_tracer(run_id)
             agent_result = run_agent(
                 task=task,
                 system_prompt=SYSTEM_PROMPT,
                 executor=self.tool_executor,
                 client=self.llm,
                 max_iterations=self.config.context.max_agent_iterations,
+                tracer=tracer,
             )
+            tracer.on_iteration_complete(iteration, agent_result.rationale, agent_result.significant)
             self.store.update_session_cost(session.id, self.llm.total_cost)
             logger.info(f"Agent finished (cost so far: ${self.llm.total_cost:.2f})")
 
@@ -482,12 +488,14 @@ When done, provide:
 RATIONALE: <what you fixed and why>
 """
 
+        tracer = self._create_tracer(run_id)
         agent_result = run_agent(
             task=task,
             system_prompt=SYSTEM_PROMPT,
             executor=self.tool_executor,
             client=self.llm,
             max_iterations=self.config.context.max_agent_iterations,
+            tracer=tracer,
         )
         self.store.update_session_cost(
             self.store.query_runs(run_id=run_id)[0].session_id if run_id else "",
@@ -550,17 +558,22 @@ def run_loop(
     config: RevisConfig,
     name: str,
     budget: Budget,
+    console: Console,
     baseline_run_id: str | None = None,
 ) -> Session:
     """Run the main Revis loop."""
     repo_path = Path.cwd()
     store = SQLiteRunStore(REVIS_DIR / "revis.db")
 
-    loop = RevisLoop(config, store, repo_path)
+    loop = RevisLoop(config, store, repo_path, console)
     return loop.run(name, budget, baseline_run_id)
 
 
-def resume_loop(config: RevisConfig, session: Session) -> Session:
+def resume_loop(
+    config: RevisConfig,
+    session: Session,
+    console: Console,
+) -> Session:
     """Resume a stopped session."""
     repo_path = Path.cwd()
     store = SQLiteRunStore(REVIS_DIR / "revis.db")
@@ -569,7 +582,7 @@ def resume_loop(config: RevisConfig, session: Session) -> Session:
     remaining = session.budget.remaining()
     budget = Budget(type=session.budget.type, value=remaining)
 
-    loop = RevisLoop(config, store, repo_path)
+    loop = RevisLoop(config, store, repo_path, console)
 
     # Checkout the session branch
     loop.git.checkout(session.branch)

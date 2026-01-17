@@ -1,11 +1,17 @@
 """Agentic loop for tool-based code editing."""
 
+from __future__ import annotations
+
 import json
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from revis.llm.client import LLMClient
 from revis.llm.tools import TOOLS, ToolExecutor
+
+if TYPE_CHECKING:
+    from revis.llm.tracer import AgentTracer
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,7 @@ def run_agent(
     executor: ToolExecutor,
     client: LLMClient,
     max_iterations: int = 20,
+    tracer: AgentTracer | None = None,
 ) -> AgentResult:
     """Run the agentic loop until the LLM finishes or hits max iterations.
 
@@ -37,6 +44,7 @@ def run_agent(
         executor: ToolExecutor instance with repo_root and deny patterns
         client: LLMClient instance for API calls
         max_iterations: Maximum number of LLM round-trips
+        tracer: Optional AgentTracer for rich output and persistence
 
     Returns:
         AgentResult with rationale, files modified, and status
@@ -76,12 +84,13 @@ def run_agent(
                 args = tool_call["arguments"]
                 tool_id = tool_call["id"]
 
-                # Log at INFO level so we can see what agent is doing
-                args_summary = str(args)[:100] + "..." if len(str(args)) > 100 else str(args)
-                logger.info(f"Tool call: {name}({args_summary})")
+                if tracer:
+                    tracer.on_tool_call(name, args)
+
                 result = executor.execute(name, args)
-                result_summary = result[:150] + "..." if len(result) > 150 else result
-                logger.debug(f"Tool result: {result_summary}")
+
+                if tracer:
+                    tracer.on_tool_result(name, result)
 
                 messages.append({
                     "role": "tool",

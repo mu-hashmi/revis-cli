@@ -129,3 +129,12 @@ class RunStore(Protocol):
     def update_decision_commit(self, decision_id: str, commit_sha: str) -> None:
         """Update the commit SHA for a decision."""
         ...
+
+    # Trace logging
+    def log_trace(self, run_id: str, event_type: str, data: dict) -> None:
+        """Log a trace event (tool call or result) for a run."""
+        ...
+
+    def get_traces(self, run_id: str) -> list[dict]:
+        """Get all traces for a run, ordered by timestamp."""
+        ...
