@@ -152,7 +152,7 @@ def load_config(path: Path) -> RevisConfig:
 
 def get_config_template() -> str:
     """Get the default configuration template."""
-    return '''# Revis Configuration
+    return """# Revis Configuration
 
 executor:
   type: local  # 'local' (run here) or 'ssh' (sync to remote)
@@ -193,6 +193,9 @@ guardrails:
   plateau_detection_enabled: true
   timeout_enabled: true
 
+# Agent can access entire repo by default.
+# Use deny to block access to files,
+# and constraints to set boundaries for changes.
 context:
   deny:
     - ".git/**"
@@ -205,14 +208,32 @@ context:
     - "node_modules/**"
     - "revis.yaml"  # Agent cannot modify revis config; use NEXT_COMMAND to change CLI args
   constraints:
-    - "Learning rate must be between 1e-6 and 1e-2"
-    - "Batch size must be a power of 2"
+    # - "Learning rate must be between 1e-6 and 1e-2"
+    # - "Batch size must be a power of 2"
   history: 10
   log_tail_lines: 200
   max_agent_iterations: 20
 
 llm:
-  model: claude-sonnet-4-20250514
+  # Uncomment one of the models below (requires corresponding API key in env)
+  # See https://docs.litellm.ai/docs/providers for full list of supported models
+  #
+  # Anthropic (ANTHROPIC_API_KEY)
+  # model: claude-sonnet-4-20250514
+  # model: claude-opus-4-5-20251101
+  # model: claude-haiku-4-5-20251001
+  #
+  # OpenAI (OPENAI_API_KEY)
+  # model: gpt-5.2-2025-12-11
+  # model: gpt-5-mini-2025-08-07
+  # model: gpt-5-nano-2025-08-07
+  #
+  # Google (GEMINI_API_KEY)
+  # model: gemini/gemini-3-pro-preview
+  # model: gemini/gemini-3-flash-preview
+  # model: gemini/gemini-2.5-flash
+  #
+  model: claude-sonnet-4-5-20250929  # default
   # api_base: null  # Optional custom API endpoint
   fallback: []  # Fallback models on API errors
 
@@ -224,4 +245,4 @@ github:
     enabled: false
     require_target_achieved: true
     # min_improvement_percent: 5.0
-'''
+"""
