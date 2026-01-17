@@ -202,6 +202,8 @@ class RevisLoop:
     ) -> Session:
         """Inner loop logic."""
         iteration = session.iteration_count
+        # Track current training command (can be overridden by agent via NEXT_COMMAND)
+        current_train_cmd = self.config.entry.train
 
         while True:
             # Check stop signal
@@ -242,7 +244,7 @@ class RevisLoop:
 
             # Launch training with Revis environment variables
             session_name = f"revis-{session.id}"
-            train_cmd = self.config.entry.train
+            train_cmd = current_train_cmd
 
             # Build environment variables for training
             run_env = collect_training_env(self.config, self.repo_path)
@@ -423,7 +425,7 @@ class RevisLoop:
                 constraints=self.config.context.constraints,
                 target_value=self.config.metrics.target,
                 minimize=self.config.metrics.minimize,
-                train_command=self.config.entry.train,
+                train_command=current_train_cmd,
             )
 
             tracer = self._create_tracer(run_id)
@@ -462,6 +464,11 @@ class RevisLoop:
             ))
 
             logger.info(f"Committed {sha[:7]}: {agent_result.rationale}")
+
+            # Update training command if agent specified one for next iteration
+            if agent_result.next_command:
+                current_train_cmd = agent_result.next_command
+                logger.info(f"Next iteration will use command: {current_train_cmd}")
 
             # Update budget for runs
             if budget.type == "runs":

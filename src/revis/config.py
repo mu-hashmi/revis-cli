@@ -203,6 +203,7 @@ context:
     - "wandb/**"
     - ".revis/**"
     - "node_modules/**"
+    - "revis.yaml"  # Agent cannot modify revis config; use NEXT_COMMAND to change CLI args
   constraints:
     - "Learning rate must be between 1e-6 and 1e-2"
     - "Batch size must be a power of 2"

@@ -15,7 +15,7 @@ SYSTEM_PROMPT = """You are Revis, an autonomous ML training optimizer. Your job 
 Each iteration, you'll be given:
 - Run history with metrics from previous iterations
 - Current run results (eval.json metrics) with target metric goal
-- Training log tail (last 200 lines)
+- The training command being used
 - Analysis of guardrail checks (NaN detection, divergence, plateau)
 
 ## What you MUST do
@@ -38,6 +38,7 @@ You MUST make at least one change every iteration. Explore the codebase with you
 - Write complete file contents (not partial updates)
 - Test one hypothesis per iteration
 - Look for configs in common locations: config/, configs/, *.yaml, *.json
+- You cannot modify revis.yaml (the Revis config file)
 
 ## When you're done
 
@@ -45,6 +46,12 @@ After making changes, respond with:
 
 RATIONALE: <1-2 sentence explanation of what you changed and why>
 SIGNIFICANT: <yes/no - is this a key decision point?>
+
+Optionally, if you need to change CLI arguments for the next training run:
+
+NEXT_COMMAND: <full training command with new arguments>
+
+Use NEXT_COMMAND when hyperparameters are passed via CLI args rather than config files. The command you specify will be used for the next iteration. If not specified, the current command continues to be used.
 
 ## If truly stuck
 
@@ -147,7 +154,12 @@ def build_constraints_section(constraints: list[str]) -> str:
 
 def build_training_command_section(train_command: str) -> str:
     """Build the training command section."""
-    return f"<training_command>\n{train_command}\n</training_command>"
+    return (
+        "<training_command>\n"
+        f"{train_command}\n"
+        "(Use NEXT_COMMAND in your response to change CLI arguments for the next run)\n"
+        "</training_command>"
+    )
 
 
 def build_iteration_context(

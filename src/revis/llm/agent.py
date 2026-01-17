@@ -26,6 +26,7 @@ class AgentResult:
     escalate_reason: str | None = None
     files_modified: list[str] = field(default_factory=list)
     tool_calls_count: int = 0
+    next_command: str | None = None  # Override training command for next iteration
 
 
 def run_agent(
@@ -128,11 +129,13 @@ def parse_agent_response(text: str) -> AgentResult:
         RATIONALE: <1-2 sentence explanation>
         SIGNIFICANT: yes/no
         ESCALATE: <reason>
+        NEXT_COMMAND: <training command for next iteration>
     """
     rationale = None
     significant = False
     escalate = False
     escalate_reason = None
+    next_command = None
 
     for line in text.strip().split("\n"):
         line_upper = line.upper()
@@ -143,10 +146,13 @@ def parse_agent_response(text: str) -> AgentResult:
         elif line_upper.startswith("ESCALATE:"):
             escalate = True
             escalate_reason = line.split(":", 1)[1].strip()
+        elif line_upper.startswith("NEXT_COMMAND:"):
+            next_command = line.split(":", 1)[1].strip()
 
     return AgentResult(
         rationale=rationale or "No rationale provided",
         significant=significant,
         escalate=escalate,
         escalate_reason=escalate_reason,
+        next_command=next_command,
     )
