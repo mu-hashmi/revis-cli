@@ -105,9 +105,6 @@ executor:
 entry:
   train: "python train.py --config config.yaml"
   eval: "python eval.py"
-  log_path: logs/train.log
-  eval_path: results/eval.json
-  checkpoint_dir: checkpoints
 
 metrics:
   primary: val_loss
@@ -124,26 +121,18 @@ guardrails:
   divergence_detection_enabled: false
 
 context:
-  include:
-    - config.yaml
-    - src/model.py
+  deny:
+    - "*.lock"
+  constraints:
+    - "Learning rate between 1e-6 and 1e-2"
   history: 20
   log_tail_lines: 500
-  max_tokens: 100000
+  max_agent_iterations: 15
 
 llm:
   model: claude-opus-4-20250514
   fallback:
     - claude-sonnet-4-20250514
-
-action_bounds:
-  allow:
-    - "*.yaml"
-    - "src/*.py"
-  deny:
-    - "*.lock"
-  constraints:
-    - "Learning rate between 1e-6 and 1e-2"
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(config_yaml)
@@ -157,6 +146,6 @@ action_bounds:
             assert config.metrics.target == 0.05
             assert config.guardrails.plateau_runs == 5
             assert config.guardrails.divergence_detection_enabled is False
-            assert config.context.max_tokens == 100000
+            assert config.context.max_agent_iterations == 15
             assert len(config.llm.fallback) == 1
-            assert len(config.action_bounds.constraints) == 1
+            assert len(config.context.constraints) == 1
