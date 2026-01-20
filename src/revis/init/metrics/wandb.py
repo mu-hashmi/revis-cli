@@ -1,0 +1,79 @@
+"""Weights & Biases metrics source implementation."""
+
+import os
+from pathlib import Path
+
+
+class WandbMetricsSource:
+    """Weights & Biases metrics source for init."""
+
+    def __init__(self):
+        self._api = None
+        self._entity: str | None = None
+
+    @staticmethod
+    def detect_auth() -> bool:
+        """Check for W&B API key in env or netrc."""
+        if os.environ.get("WANDB_API_KEY"):
+            return True
+
+        netrc_path = Path.home() / ".netrc"
+        if netrc_path.exists():
+            try:
+                content = netrc_path.read_text()
+                if "api.wandb.ai" in content:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def connect(self) -> bool:
+        """Connect to W&B API."""
+        try:
+            import wandb
+
+            self._api = wandb.Api()
+            self._entity = self._api.default_entity
+            return True
+        except ImportError:
+            return False
+        except Exception:
+            return False
+
+    def list_projects(self) -> list[str]:
+        """List user's W&B projects."""
+        if self._api is None:
+            return []
+
+        try:
+            projects = self._api.projects(entity=self._entity)
+            return [p.name for p in projects]
+        except Exception:
+            return []
+
+    def list_metrics(self, project: str, limit_runs: int = 10) -> list[str]:
+        """Get metric keys from recent runs."""
+        if self._api is None:
+            return []
+
+        try:
+            runs = self._api.runs(
+                path=f"{self._entity}/{project}",
+                per_page=limit_runs,
+            )
+
+            metric_keys = set()
+            for run in runs:
+                for key in run.summary.keys():
+                    if not key.startswith("_"):
+                        metric_keys.add(key)
+
+            return sorted(metric_keys)
+        except Exception:
+            return []
+
+    def get_source_type(self) -> str:
+        return "wandb"
+
+    def get_entity(self) -> str | None:
+        return self._entity

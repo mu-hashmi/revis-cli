@@ -85,7 +85,7 @@ def get_store() -> SQLiteRunStore:
 
 @app.command()
 def init():
-    """Initialize Revis in the current directory."""
+    """Initialize Revis in the current directory with interactive setup."""
     revis_dir = Path(REVIS_DIR)
     config_file = Path(CONFIG_FILE)
 
@@ -104,8 +104,36 @@ def init():
     store = SQLiteRunStore(db_path)
     store.initialize()
 
-    # Write config template
-    config_file.write_text(get_config_template())
+    # Run interactive setup
+    try:
+        from revis.config import generate_config_yaml
+        from revis.init.prompts import run_interactive_init
+
+        init_config = run_interactive_init()
+        config_content = generate_config_yaml(
+            train_command=init_config.train_command,
+            metrics_source=init_config.metrics_source,
+            metrics_project=init_config.metrics_project,
+            metrics_entity=init_config.metrics_entity,
+            primary_metric=init_config.primary_metric,
+            minimize=init_config.minimize,
+            executor_type=init_config.executor_type,
+            ssh_host=init_config.ssh_host,
+            ssh_user=init_config.ssh_user,
+            ssh_port=init_config.ssh_port,
+            ssh_key_path=init_config.ssh_key_path,
+            coding_agent_type=init_config.coding_agent_type,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled.[/yellow]")
+        raise typer.Exit(0)
+    except ImportError as e:
+        console.print(f"[yellow]Warning:[/yellow] Interactive setup unavailable: {e}")
+        console.print("Using default template instead.")
+        config_content = get_config_template()
+
+    # Write config
+    config_file.write_text(config_content)
 
     # Add .revis to .gitignore if it exists
     gitignore = Path(".gitignore")
@@ -119,10 +147,8 @@ def init():
         gitignore.write_text(f"# Revis\n{REVIS_DIR}/\n")
         console.print(f"Created .gitignore with {REVIS_DIR}/")
 
-    console.print("[green]Initialized Revis.[/green]")
-    console.print(f"  Config: {CONFIG_FILE}")
-    console.print(f"  Database: {DB_FILE}")
-    console.print(f"\nEdit {CONFIG_FILE} to configure your training setup.")
+    console.print("\n[green]Created revis.yaml[/green]")
+    console.print("Run 'revis loop --name experiment-1 --budget 4h' to start.")
 
 
 @app.command()
@@ -657,12 +683,12 @@ def _print_trace_args(tool: str, args: dict) -> None:
 
 
 @app.command()
-def export(
+def pr(
     name: str = typer.Argument(..., help="Session name to export"),
     no_pr: bool = typer.Option(False, "--no-pr", help="Push branch but don't create PR"),
     force: bool = typer.Option(False, "--force", "-f", help="Force push (use with caution)"),
 ):
-    """Export a session to remote and optionally create a PR."""
+    """Push session branch to remote and create a GitHub PR."""
     store = get_store()
 
     session = store.get_session_by_name(name)
@@ -841,6 +867,254 @@ def format_duration(seconds: int) -> str:
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
         return f"{hours}h {minutes}m"
+
+
+@app.command()
+def history(
+    name: str = typer.Argument(..., help="Session name"),
+):
+    """Show iteration history for a session."""
+    import json
+
+    store = get_store()
+    config_path = Path(CONFIG_FILE)
+    config = load_config(config_path) if config_path.exists() else None
+
+    session = store.get_session_by_name(name)
+    if session is None:
+        console.print(f"[red]Error:[/red] Session '{name}' not found.")
+        raise typer.Exit(1)
+
+    runs = store.query_runs(session_id=session.id, limit=100)
+    runs = list(reversed(runs))
+
+    if not runs:
+        console.print("No iterations found.")
+        return
+
+    primary_metric = config.metrics.primary if config else "loss"
+
+    table = Table(title=f"Session: {name}")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Change")
+    table.add_column("Hypothesis")
+    table.add_column("Outcome")
+    table.add_column(primary_metric, justify="right")
+
+    for run in runs:
+        change_desc = run.change_description or "initial"
+        if run.change_type == "code_handoff":
+            change_desc = f"[cyan][code][/cyan] {change_desc}"
+
+        hypothesis = run.hypothesis or "-"
+        if len(hypothesis) > 35:
+            hypothesis = hypothesis[:32] + "..."
+
+        outcome = run.outcome or "-"
+        outcome_style = {
+            "improved": "green",
+            "regressed": "red",
+            "plateau": "yellow",
+            "failed": "red",
+        }.get(outcome, "white")
+
+        metric_value = "-"
+        if run.metrics_json:
+            try:
+                metrics = json.loads(run.metrics_json)
+                if primary_metric in metrics:
+                    metric_value = f"{metrics[primary_metric]:.4f}"
+            except json.JSONDecodeError:
+                pass
+
+        if metric_value == "-":
+            db_metrics = store.get_run_metrics(run.id)
+            for m in db_metrics:
+                if m.name == primary_metric:
+                    metric_value = f"{m.value:.4f}"
+                    break
+
+        table.add_row(
+            str(run.iteration_number),
+            change_desc[:40],
+            hypothesis,
+            f"[{outcome_style}]{outcome}[/{outcome_style}]",
+            metric_value,
+        )
+
+    console.print(table)
+
+
+@app.command()
+def compare(
+    name: str = typer.Argument(..., help="Session name"),
+    iter1: int = typer.Argument(..., help="First iteration number"),
+    iter2: int = typer.Argument(..., help="Second iteration number"),
+):
+    """Compare two iterations from a session."""
+    import json
+
+    store = get_store()
+
+    session = store.get_session_by_name(name)
+    if session is None:
+        console.print(f"[red]Error:[/red] Session '{name}' not found.")
+        raise typer.Exit(1)
+
+    runs = store.query_runs(session_id=session.id, limit=100)
+    run1 = next((r for r in runs if r.iteration_number == iter1), None)
+    run2 = next((r for r in runs if r.iteration_number == iter2), None)
+
+    if run1 is None:
+        console.print(f"[red]Error:[/red] Iteration {iter1} not found.")
+        raise typer.Exit(1)
+    if run2 is None:
+        console.print(f"[red]Error:[/red] Iteration {iter2} not found.")
+        raise typer.Exit(1)
+
+    def get_metrics(run):
+        if run.metrics_json:
+            try:
+                return json.loads(run.metrics_json)
+            except json.JSONDecodeError:
+                pass
+        db_metrics = store.get_run_metrics(run.id)
+        return {m.name: m.value for m in db_metrics}
+
+    metrics1 = get_metrics(run1)
+    metrics2 = get_metrics(run2)
+
+    table = Table(title=f"Compare Iteration {iter1} vs {iter2}")
+    table.add_column("", style="bold")
+    table.add_column(f"Iteration {iter1}")
+    table.add_column(f"Iteration {iter2}")
+
+    table.add_row("Change", run1.change_description or "initial", run2.change_description or "initial")
+    table.add_row("Outcome", run1.outcome or "-", run2.outcome or "-")
+
+    all_metric_names = sorted(set(metrics1.keys()) | set(metrics2.keys()))
+    for metric_name in all_metric_names:
+        v1 = metrics1.get(metric_name)
+        v2 = metrics2.get(metric_name)
+
+        v1_str = f"{v1:.4f}" if v1 is not None else "-"
+        v2_str = f"{v2:.4f}" if v2 is not None else "-"
+
+        if v1 is not None and v2 is not None:
+            delta = v2 - v1
+            pct = (delta / abs(v1) * 100) if v1 != 0 else 0
+            if delta < 0:
+                v2_str += f" [green](↓ {abs(pct):.1f}%)[/green]"
+            elif delta > 0:
+                v2_str += f" [red](↑ {pct:.1f}%)[/red]"
+
+        table.add_row(metric_name, v1_str, v2_str)
+
+    console.print(table)
+
+
+@app.command("export")
+def export_data(
+    name: str = typer.Argument(..., help="Session name to export"),
+    format: str = typer.Option("json", "--format", "-f", help="Output format: json or csv"),
+):
+    """Export session data to JSON or CSV."""
+    import csv
+    import io
+    import json
+
+    store = get_store()
+
+    session = store.get_session_by_name(name)
+    if session is None:
+        console.print(f"[red]Error:[/red] Session '{name}' not found.")
+        raise typer.Exit(1)
+
+    runs = store.query_runs(session_id=session.id, limit=1000)
+    runs = list(reversed(runs))
+
+    if format == "json":
+        data = {
+            "session": {
+                "name": session.name,
+                "branch": session.branch,
+                "status": session.status,
+                "iterations": session.iteration_count,
+                "started_at": session.started_at.isoformat(),
+                "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+            },
+            "iterations": [],
+        }
+
+        for run in runs:
+            metrics = {}
+            if run.metrics_json:
+                try:
+                    metrics = json.loads(run.metrics_json)
+                except json.JSONDecodeError:
+                    pass
+            if not metrics:
+                db_metrics = store.get_run_metrics(run.id)
+                metrics = {m.name: m.value for m in db_metrics}
+
+            data["iterations"].append({
+                "number": run.iteration_number,
+                "change_type": run.change_type,
+                "change_description": run.change_description,
+                "hypothesis": run.hypothesis,
+                "outcome": run.outcome,
+                "analysis": run.analysis,
+                "metrics": metrics,
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "ended_at": run.ended_at.isoformat() if run.ended_at else None,
+            })
+
+        print(json.dumps(data, indent=2))
+
+    elif format == "csv":
+        if not runs:
+            console.print("No iterations to export.")
+            return
+
+        all_metric_names: set[str] = set()
+        run_metrics_cache = {}
+        for run in runs:
+            metrics = {}
+            if run.metrics_json:
+                try:
+                    metrics = json.loads(run.metrics_json)
+                except json.JSONDecodeError:
+                    pass
+            if not metrics:
+                db_metrics = store.get_run_metrics(run.id)
+                metrics = {m.name: m.value for m in db_metrics}
+            run_metrics_cache[run.id] = metrics
+            all_metric_names.update(metrics.keys())
+
+        fieldnames = [
+            "iteration", "change_type", "change_description",
+            "hypothesis", "outcome",
+        ] + sorted(all_metric_names)
+
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for run in runs:
+            row = {
+                "iteration": run.iteration_number,
+                "change_type": run.change_type or "",
+                "change_description": run.change_description or "",
+                "hypothesis": run.hypothesis or "",
+                "outcome": run.outcome or "",
+            }
+            row.update(run_metrics_cache.get(run.id, {}))
+            writer.writerow(row)
+
+        print(output.getvalue())
+    else:
+        console.print(f"[red]Error:[/red] Unknown format: {format}")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

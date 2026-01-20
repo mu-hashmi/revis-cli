@@ -83,8 +83,8 @@ def build_current_run_section(
         lines.append(f"Primary metric ({primary_metric}): {current_value:.6f}")
         if target_value is not None:
             gap = abs(current_value - target_value)
-            direction = "below" if (minimize and current_value > target_value) or (not minimize and current_value < target_value) else "at/above"
-            lines.append(f"  Target: {target_value} (currently {gap:.3f} {'above' if minimize else 'below'} target)")
+            direction = "above" if minimize else "below"
+            lines.append(f"  Target: {target_value} (currently {gap:.3f} {direction} target)")
         if baseline_value is not None:
             delta = current_value - baseline_value
             pct = (delta / abs(baseline_value) * 100) if baseline_value != 0 else 0

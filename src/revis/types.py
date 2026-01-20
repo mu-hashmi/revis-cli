@@ -54,7 +54,7 @@ class Session(BaseModel):
 
 
 class Run(BaseModel):
-    """A single training run."""
+    """A single training run (iteration)."""
 
     id: str
     session_id: str
@@ -65,6 +65,19 @@ class Run(BaseModel):
     started_at: datetime | None = None
     ended_at: datetime | None = None
     exit_code: int | None = None
+
+    # Change tracking
+    change_type: Literal["config", "cli_args", "code_handoff", "initial"] | None = None
+    change_description: str | None = None
+    change_diff: str | None = None
+
+    # Reasoning
+    hypothesis: str | None = None
+
+    # Results
+    metrics_json: str | None = None
+    outcome: Literal["improved", "regressed", "plateau", "failed"] | None = None
+    analysis: str | None = None
 
 
 class Metric(BaseModel):
@@ -88,11 +101,24 @@ class Artifact(BaseModel):
 
 
 class Decision(BaseModel):
-    """A decision made by the LLM."""
+    """A decision made by the LLM (legacy, kept for backward compatibility)."""
 
     action_type: Literal["code_patch", "escalate"]
     rationale: str
     commit_sha: str | None = None
+
+
+class Suggestion(BaseModel):
+    """A suggestion from the LLM agent."""
+
+    id: int | None = None
+    session_id: str
+    run_id: str | None = None
+    created_at: datetime | None = None
+    suggestion_type: Literal["config", "cli_args", "code", "architecture", "data"]
+    content: str
+    status: Literal["pending", "accepted", "rejected", "handed_off"] = "pending"
+    handed_off_to: str | None = None
 
 
 class EvalResult(BaseModel):

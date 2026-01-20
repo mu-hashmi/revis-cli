@@ -8,10 +8,11 @@ from pathlib import Path
 
 from rich.console import Console
 
+from revis.agents.base import HandoffContext
+from revis.agents.detect import get_coding_agent
 from revis.analyzer.compare import RunAnalyzer
 from revis.analyzer.detectors import GuardrailChecker
 from revis.config import RevisConfig, parse_duration
-from revis.evaluator.harness import EvalHarness
 from revis.executor.base import Executor
 from revis.executor.local import LocalConfig, LocalExecutor
 from revis.executor.ssh import SSHConfig, SSHExecutor
@@ -21,8 +22,9 @@ from revis.llm.client import LLMClient
 from revis.llm.prompts import SYSTEM_PROMPT, build_iteration_context
 from revis.llm.tools import ToolExecutor
 from revis.llm.tracer import AgentTracer
+from revis.metrics.eval_json import EvalJsonCollector
 from revis.store.sqlite import SQLiteRunStore
-from revis.types import Budget, Decision, Session, TerminationReason
+from revis.types import Budget, Decision, EvalResult, Session, Suggestion, TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +120,10 @@ class RevisLoop:
 
         self.llm = LLMClient(config.llm)
         self.git = GitManager(GitConfig(repo_path=repo_path))
-        self.evaluator = EvalHarness(self.executor)
+
+        # Create metrics collector based on config
+        self.metrics_collector = self._create_metrics_collector()
+
         self.analyzer = RunAnalyzer(
             store=store,
             primary_metric=config.metrics.primary,
@@ -130,9 +135,26 @@ class RevisLoop:
             deny_patterns=config.context.deny,
         )
 
+        # Initialize coding agent if configured
+        self.coding_agent = get_coding_agent(config.coding_agent.type)
+
     def _create_tracer(self, run_id: str) -> AgentTracer:
         """Create an AgentTracer for the given run."""
         return AgentTracer(console=self.console, backend=self.store, run_id=run_id)
+
+    def _create_metrics_collector(self):
+        """Create a metrics collector based on config."""
+        if self.config.metrics.source == "wandb":
+            try:
+                from revis.metrics.wandb import WandbCollector
+                return WandbCollector(
+                    project=self.config.metrics.project,
+                    entity=self.config.metrics.entity,
+                )
+            except ImportError:
+                logger.warning("W&B not installed, falling back to eval.json")
+                return EvalJsonCollector(self.executor)
+        return EvalJsonCollector(self.executor)
 
     def _cleanup_active_process(self) -> None:
         """Kill any active training process."""
@@ -330,22 +352,44 @@ class RevisLoop:
 
             self.store.set_run_status(run_id, "completed")
 
-            # Collect eval results from run output directory
-            eval_path = f"{run_output_dir}/eval.json"
-            logger.info(f"Collecting evaluation results from {eval_path}...")
-            try:
-                eval_result = self.evaluator.collect(eval_path)
-            except FileNotFoundError:
-                logger.error(f"eval.json not found at {eval_path}")
-                self.store.set_run_status(run_id, "failed")
-
-                session = self.store.get_session(session.id)
-                new_retry = session.retry_budget - 1
-                self.store.update_session_retry_budget(session.id, new_retry)
-
-                if new_retry <= 0:
-                    return self._terminate(session, TerminationReason.RETRY_EXHAUSTION, base_branch)
-                continue
+            # Collect metrics based on configured source
+            logger.info("Collecting evaluation results...")
+            if self.config.metrics.source == "wandb":
+                # For W&B, wait for run to finish and get metrics from API
+                metrics = self.metrics_collector.get_metrics(session_name)
+                if metrics is None:
+                    logger.error("Failed to get metrics from W&B")
+                    self.store.set_run_status(run_id, "failed")
+                    session = self.store.get_session(session.id)
+                    new_retry = session.retry_budget - 1
+                    self.store.update_session_retry_budget(session.id, new_retry)
+                    if new_retry <= 0:
+                        return self._terminate(
+                            session, TerminationReason.RETRY_EXHAUSTION, base_branch
+                        )
+                    continue
+                eval_result = EvalResult(metrics=metrics)
+            else:
+                # For eval.json, read from run output directory
+                eval_path = f"{run_output_dir}/eval.json"
+                try:
+                    import json as json_mod
+                    content = self.executor.read_file(eval_path)
+                    data = json_mod.loads(content)
+                    metrics = {k: float(v) for k, v in data.get("metrics", {}).items()
+                               if isinstance(v, (int, float))}
+                    eval_result = EvalResult(metrics=metrics)
+                except (FileNotFoundError, json.JSONDecodeError) as e:
+                    logger.error(f"Failed to read eval.json: {e}")
+                    self.store.set_run_status(run_id, "failed")
+                    session = self.store.get_session(session.id)
+                    new_retry = session.retry_budget - 1
+                    self.store.update_session_retry_budget(session.id, new_retry)
+                    if new_retry <= 0:
+                        return self._terminate(
+                            session, TerminationReason.RETRY_EXHAUSTION, base_branch
+                        )
+                    continue
 
             # Log metrics
             self.store.log_metrics(run_id, eval_result.metrics)
@@ -393,7 +437,6 @@ class RevisLoop:
                 prev_metrics = self.store.get_run_metrics(prev_runs[1].id)
                 if prev_metrics:
                     prev_eval_dict = {m.name: m.value for m in prev_metrics}
-                    from revis.types import EvalResult
                     prev_eval = EvalResult(metrics=prev_eval_dict)
 
             # Analyze run
@@ -410,8 +453,10 @@ class RevisLoop:
             # Build iteration context and run agent
             logger.info("Running agent to propose improvements...")
 
-            # Reset tool executor's file tracking and set run context for log access
-            self.tool_executor.files_modified = []
+            # Reset tool executor state for this iteration
+            self.tool_executor.config_changes = []
+            self.tool_executor.next_command = None
+            self.tool_executor.code_change_request = None
             self.tool_executor._executor = self.executor
             self.tool_executor._run_output_dir = run_output_dir
 
@@ -446,28 +491,102 @@ class RevisLoop:
                 logger.info(f"Agent escalated: {agent_result.escalate_reason}")
                 return self._terminate(session, TerminationReason.LLM_ESCALATION, base_branch)
 
+            # Determine what changes were made
+            has_config_changes = len(self.tool_executor.config_changes) > 0
+            has_command_change = self.tool_executor.next_command is not None
+            has_code_request = self.tool_executor.code_change_request is not None
+
             # Handle no changes (plateau)
-            if not agent_result.files_modified:
+            if not has_config_changes and not has_command_change and not has_code_request:
                 logger.info("Agent proposed no changes - treating as plateau")
                 return self._terminate(session, TerminationReason.PLATEAU, base_branch)
 
-            # Commit changes (files already written by agent)
-            commit_msg = f"Revis iteration {iteration}: {agent_result.rationale}"
-            sha = self.git.commit(commit_msg)
-            self.store.set_run_commit(run_id, sha)
+            # Determine change type and description
+            change_type = "config" if has_config_changes else "cli_args"
+            change_descriptions = []
 
-            # Record decision
-            self.store.attach_decision(run_id, Decision(
-                action_type="code_patch",
-                rationale=agent_result.rationale,
-                commit_sha=sha,
-            ))
+            if has_config_changes:
+                for change in self.tool_executor.config_changes:
+                    change_descriptions.append(
+                        f"{change['key']}: {change['old_value']} → {change['new_value']}"
+                    )
 
-            logger.info(f"Committed {sha[:7]}: {agent_result.rationale}")
+            if has_command_change:
+                change_type = "cli_args" if not has_config_changes else change_type
+                change_descriptions.append(f"command: {self.tool_executor.next_command}")
+
+            # Handle code change request (hand off to coding agent)
+            if has_code_request:
+                change_type = "code_handoff"
+                request = self.tool_executor.code_change_request
+
+                # Store the suggestion
+                suggestion = Suggestion(
+                    session_id=session.id,
+                    run_id=run_id,
+                    suggestion_type="code",
+                    content=request["suggestion"],
+                    status="pending",
+                )
+                self.store.create_suggestion(suggestion)
+
+                # Hand off to coding agent if available
+                if self.coding_agent is not None:
+                    logger.info("Handing off code change to coding agent...")
+                    handoff_context = HandoffContext(
+                        iteration_history=run_summaries,
+                        latest_metrics=eval_result.metrics,
+                        suggestion=request["suggestion"],
+                        relevant_files=request.get("relevant_files", []),
+                        constraints=self.config.context.constraints or None,
+                    )
+                    handoff_result = self.coding_agent.handoff(handoff_context)
+
+                    if handoff_result.success:
+                        change_descriptions.append(
+                            f"[code] {request['suggestion'][:50]}..."
+                        )
+                        # Update suggestion status
+                        suggestion.status = "accepted"
+                        suggestion.handed_off_to = self.config.coding_agent.type
+                    else:
+                        logger.warning(f"Coding agent failed: {handoff_result.error_message}")
+                        suggestion.status = "rejected"
+                else:
+                    logger.info("No coding agent available - pausing for manual intervention")
+                    self.console.print(
+                        "[yellow]Code change requested but no coding agent available.[/yellow]"
+                    )
+                    self.console.print(f"[yellow]Suggestion: {request['suggestion']}[/yellow]")
+                    suggestion.status = "pending"
+
+            change_description = "; ".join(change_descriptions) if change_descriptions else None
+
+            # Update run with change info
+            self.store.update_run_change(
+                run_id=run_id,
+                change_type=change_type,
+                change_description=change_description,
+                hypothesis=agent_result.rationale,
+            )
+
+            # Commit any config changes
+            if has_config_changes or has_code_request:
+                commit_msg = f"Revis iteration {iteration}: {agent_result.rationale}"
+                sha = self.git.commit(commit_msg)
+                self.store.set_run_commit(run_id, sha)
+                logger.info(f"Committed {sha[:7]}: {agent_result.rationale}")
+
+                # Record decision
+                self.store.attach_decision(run_id, Decision(
+                    action_type=change_type,
+                    rationale=agent_result.rationale,
+                    commit_sha=sha,
+                ))
 
             # Update training command if agent specified one for next iteration
-            if agent_result.next_command:
-                current_train_cmd = agent_result.next_command
+            if has_command_change:
+                current_train_cmd = self.tool_executor.next_command
                 logger.info(f"Next iteration will use command: {current_train_cmd}")
 
             # Update budget for runs
@@ -480,7 +599,11 @@ class RevisLoop:
     def _run_agent_for_fix(self, error_context: str, run_id: str):
         """Run agent to fix an error."""
         logger.info("Running agent to fix error...")
-        self.tool_executor.files_modified = []
+
+        # Reset tool executor state
+        self.tool_executor.config_changes = []
+        self.tool_executor.next_command = None
+        self.tool_executor.code_change_request = None
 
         task = f"""The training run failed. Here's the error:
 
@@ -488,8 +611,9 @@ class RevisLoop:
 
 Please use the available tools to:
 1. Read relevant files to understand the issue
-2. Fix the problem
-3. Verify your fix with syntax checking
+2. If the issue is a configuration problem, use modify_config to fix it
+3. If the issue is a CLI argument problem, use set_next_command to fix it
+4. If the issue requires code changes, use request_code_change
 
 When done, provide:
 RATIONALE: <what you fixed and why>
@@ -508,6 +632,15 @@ RATIONALE: <what you fixed and why>
             self.store.query_runs(run_id=run_id)[0].session_id if run_id else "",
             self.llm.total_cost,
         )
+
+        # Check if any changes were made
+        has_changes = (
+            len(self.tool_executor.config_changes) > 0 or
+            self.tool_executor.next_command is not None or
+            self.tool_executor.code_change_request is not None
+        )
+        agent_result.files_modified = ["config_changed"] if has_changes else []
+
         return agent_result
 
     def _terminate(

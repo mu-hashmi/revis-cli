@@ -14,6 +14,7 @@ from revis.types import (
     Metric,
     Run,
     Session,
+    Suggestion,
     TerminationReason,
 )
 
@@ -55,16 +56,39 @@ class SQLiteRunStore:
         if not cursor.fetchone():
             return  # Table doesn't exist yet, skip migrations
 
+        # Session migrations
         cursor = self._conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
+        session_columns = [row[1] for row in cursor.fetchall()]
 
-        if "name" not in columns:
+        if "name" not in session_columns:
             self._conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT UNIQUE")
             self._conn.execute("ALTER TABLE sessions ADD COLUMN exported_at TIMESTAMP")
             self._conn.execute(
                 "UPDATE sessions SET name = 'session-' || id WHERE name IS NULL"
             )
             self._conn.commit()
+
+        if "config_snapshot" not in session_columns:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN config_snapshot TEXT")
+            self._conn.commit()
+
+        # Run migrations - add new columns for iteration tracking
+        cursor = self._conn.execute("PRAGMA table_info(runs)")
+        run_columns = [row[1] for row in cursor.fetchall()]
+
+        new_run_columns = [
+            ("change_type", "TEXT"),
+            ("change_description", "TEXT"),
+            ("change_diff", "TEXT"),
+            ("hypothesis", "TEXT"),
+            ("metrics_json", "TEXT"),
+            ("outcome", "TEXT"),
+            ("analysis", "TEXT"),
+        ]
+        for col_name, col_type in new_run_columns:
+            if col_name not in run_columns:
+                self._conn.execute(f"ALTER TABLE runs ADD COLUMN {col_name} {col_type}")
+        self._conn.commit()
 
         # Add traces table if it doesn't exist
         self.conn.execute("""
@@ -77,6 +101,26 @@ class SQLiteRunStore:
             )
         """)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_run ON traces(run_id)")
+
+        # Add suggestions table if it doesn't exist
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                run_id TEXT REFERENCES runs(id),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                suggestion_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                handed_off_to TEXT
+            )
+        """)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_suggestions_session ON suggestions(session_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_suggestions_run ON suggestions(run_id)"
+        )
         self.conn.commit()
 
     # Session management
@@ -432,6 +476,8 @@ class SQLiteRunStore:
         ]
 
     def _row_to_run(self, row: sqlite3.Row) -> Run:
+        # Handle optional new columns that may not exist in older DBs
+        row_dict = dict(row)
         return Run(
             id=row["id"],
             session_id=row["session_id"],
@@ -446,6 +492,13 @@ class SQLiteRunStore:
                 datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
             ),
             exit_code=row["exit_code"],
+            change_type=row_dict.get("change_type"),
+            change_description=row_dict.get("change_description"),
+            change_diff=row_dict.get("change_diff"),
+            hypothesis=row_dict.get("hypothesis"),
+            metrics_json=row_dict.get("metrics_json"),
+            outcome=row_dict.get("outcome"),
+            analysis=row_dict.get("analysis"),
         )
 
     # Decision tracking
@@ -508,3 +561,112 @@ class SQLiteRunStore:
             {"timestamp": row[0], "event_type": row[1], "data": json.loads(row[2])}
             for row in rows
         ]
+
+    # Iteration tracking (new fields on runs)
+
+    def update_run_change(
+        self,
+        run_id: str,
+        change_type: str,
+        change_description: str,
+        change_diff: str | None = None,
+        hypothesis: str | None = None,
+    ) -> None:
+        """Update a run with change tracking info."""
+        self.conn.execute(
+            """
+            UPDATE runs SET change_type = ?, change_description = ?,
+                           change_diff = ?, hypothesis = ?
+            WHERE id = ?
+            """,
+            (change_type, change_description, change_diff, hypothesis, run_id),
+        )
+        self.conn.commit()
+
+    def update_run_results(
+        self,
+        run_id: str,
+        metrics_json: str,
+        outcome: str,
+        analysis: str | None = None,
+    ) -> None:
+        """Update a run with results info."""
+        self.conn.execute(
+            """
+            UPDATE runs SET metrics_json = ?, outcome = ?, analysis = ?
+            WHERE id = ?
+            """,
+            (metrics_json, outcome, analysis, run_id),
+        )
+        self.conn.commit()
+
+    # Suggestion management
+
+    def create_suggestion(
+        self,
+        session_id: str,
+        suggestion_type: str,
+        content: str,
+        run_id: str | None = None,
+    ) -> int:
+        """Create a new suggestion."""
+        cursor = self.conn.execute(
+            """
+            INSERT INTO suggestions (session_id, run_id, suggestion_type, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            (session_id, run_id, suggestion_type, content),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def update_suggestion_status(
+        self,
+        suggestion_id: int,
+        status: str,
+        handed_off_to: str | None = None,
+    ) -> None:
+        """Update suggestion status."""
+        self.conn.execute(
+            "UPDATE suggestions SET status = ?, handed_off_to = ? WHERE id = ?",
+            (status, handed_off_to, suggestion_id),
+        )
+        self.conn.commit()
+
+    def get_suggestions(
+        self,
+        session_id: str,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[Suggestion]:
+        """Get suggestions for a session."""
+        query = "SELECT * FROM suggestions WHERE session_id = ?"
+        params: list = [session_id]
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [self._row_to_suggestion(row) for row in rows]
+
+    def get_pending_suggestions(self, session_id: str) -> list[Suggestion]:
+        """Get pending suggestions for a session."""
+        return self.get_suggestions(session_id, status="pending")
+
+    def _row_to_suggestion(self, row: sqlite3.Row) -> Suggestion:
+        return Suggestion(
+            id=row["id"],
+            session_id=row["session_id"],
+            run_id=row["run_id"],
+            created_at=(
+                datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
+            ),
+            suggestion_type=row["suggestion_type"],
+            content=row["content"],
+            status=row["status"],
+            handed_off_to=row["handed_off_to"],
+        )
