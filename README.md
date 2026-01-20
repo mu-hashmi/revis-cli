@@ -18,14 +18,42 @@ export ANTHROPIC_API_KEY=sk-...
 ## Quick Start
 
 ```bash
-# Initialize in your ML project
+# Initialize in your ML project (interactive setup)
 revis init
-
-# Edit revis.yaml - set your training command and target metric
-vim revis.yaml
 
 # Start the loop
 revis loop --name my-experiment --budget 4h
+```
+
+The `init` command walks you through setup interactively - no manual YAML editing required:
+
+```
+$ revis init
+
+Training command: python train.py --config configs/base.yaml
+
+Metrics source:
+  ❯ Weights & Biases
+    eval.json (manual)
+
+Primary metric to optimize:
+  ❯ val_loss
+    eval/perplexity
+
+Objective:
+  ❯ minimize
+    maximize
+
+Execution environment:
+  ❯ Local (tmux)
+    gpu-server (from ~/.ssh/config)
+
+Coding agent (for code changes):
+  ❯ claude-code (detected)
+    aider
+    none (pause for manual changes)
+
+Created revis.yaml
 ```
 
 The loop runs until the budget is exhausted, metrics plateau, or a target is reached.
@@ -34,77 +62,97 @@ The loop runs until the budget is exhausted, metrics plateau, or a target is rea
 
 Each iteration:
 1. Runs your training script (local tmux or remote SSH)
-2. Reads metrics from `eval.json` written by your script
+2. Collects metrics (from W&B or `eval.json`)
 3. Analyzes results and decides what to change
-4. Modifies code/config and commits
-5. Runs again
+4. Makes safe changes (config files, CLI args) or hands off code changes to a coding agent
+5. Commits and runs again
 
-When done, you get a git branch with the full iteration history. Export it as a PR:
+When done, you get a git branch with the full iteration history:
 
 ```bash
-revis export my-experiment
+# View iteration history
+revis history my-experiment
+
+# Create a PR from the experiment branch
+revis pr my-experiment
 ```
 
-## Setup
+## Metrics Collection
 
-Revis needs your training script to output metrics to `eval.json`. Add this to the end of your training script:
+Revis supports two metrics sources:
+
+### Weights & Biases (Recommended)
+
+If you use W&B, Revis can automatically detect your projects and pull metrics:
+
+```yaml
+metrics:
+  source: wandb
+  project: my-project
+  entity: my-team  # optional
+  primary: val_loss
+  minimize: true
+```
+
+### eval.json (Manual)
+
+Add this to your training script to write metrics:
 
 ```python
 import json
 import os
 from pathlib import Path
 
-# Revis sets REVIS_OUTPUT_DIR; fall back to current dir if running manually
 output_dir = Path(os.environ.get("REVIS_OUTPUT_DIR", "."))
 output_dir.mkdir(parents=True, exist_ok=True)
 
-# Write your metrics - use whatever names make sense for your task
 metrics = {
-    "val_loss": val_loss,        # your validation loss variable
-    "accuracy": accuracy,         # any other metrics you track
+    "val_loss": val_loss,
+    "accuracy": accuracy,
 }
 with open(output_dir / "eval.json", "w") as f:
-    json.dump(metrics, f)
+    json.dump({"metrics": metrics}, f)
 ```
 
-Then configure `revis.yaml` to match:
+## How Changes Work
+
+Revis uses a **safe-by-default** approach:
+
+1. **Config changes**: The LLM can modify YAML/JSON config files directly
+2. **CLI argument changes**: The LLM can change training command arguments
+3. **Code changes**: Handed off to a coding agent (Claude Code, Aider) or paused for manual intervention
+
+This keeps the LLM focused on experiment iteration while letting specialized tools handle code edits.
+
+Configure coding agent behavior in `revis.yaml`:
 
 ```yaml
-executor:
-  type: local  # or 'ssh' for remote GPU
-
-entry:
-  train: "python train.py"  # your training command
-
-metrics:
-  primary: val_loss  # must match a key in your eval.json
-  minimize: true     # true for loss, false for accuracy
-  # target: 0.1      # optional: stop early if reached
-
-guardrails:
-  max_run_duration: 2h
-  plateau_runs: 3
+coding_agent:
+  type: auto          # auto, claude-code, aider, or none
+  auto_handoff: true  # false = pause and ask before handing off
+  verify: true        # run smoke test after code changes
 ```
-
-The `metrics.primary` field must match one of the keys you write to `eval.json`.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `revis init` | Create `.revis/` and `revis.yaml` |
+| `revis init` | Interactive setup - creates `revis.yaml` |
 | `revis loop` | Start iteration loop |
 | `revis status` | Show current progress |
+| `revis history <name>` | View iteration history table |
+| `revis show <name>` | Show session details |
+| `revis compare <name> <i1> <i2>` | Compare two iterations |
 | `revis logs <name>` | View session logs |
 | `revis stop <name>` | Stop a running session |
 | `revis resume <name>` | Resume a stopped session |
-| `revis show <name>` | Show session details |
-| `revis export <name>` | Push branch and create PR |
+| `revis export <name>` | Export data as JSON/CSV |
+| `revis pr <name>` | Push branch and create GitHub PR |
 | `revis delete <name>` | Delete a session |
 
 ## Remote Execution
 
-To run on a remote GPU server:
+To run on a remote GPU server, select an SSH host during `revis init` or configure manually:
 
 ```yaml
 executor:
@@ -116,13 +164,15 @@ executor:
   work_dir: /home/ubuntu/project
 ```
 
-Revis syncs your code, runs training over SSH, and syncs results back.
+Hosts from `~/.ssh/config` are automatically detected during init.
 
 ## Requirements
 
 - Python 3.11+
 - tmux (for local execution)
 - Git repo (changes are committed per iteration)
+- Optional: `wandb` for W&B metrics integration
+- Optional: `claude` CLI or `aider` for code change handoffs
 
 ## License
 
