@@ -369,8 +369,12 @@ class RevisLoop:
             # Collect metrics based on configured source
             logger.info("Collecting evaluation results...")
             if self.config.metrics.source == "wandb":
-                # For W&B, wait for run to finish and get metrics from API
-                metrics = self.metrics_collector.get_metrics(session_name)
+                # For W&B, parse run ID from training log and fetch metrics
+                log_content = self.executor.get_log_tail(
+                    f"{run_output_dir}/train.log",
+                    lines=1000,  # Should be enough to capture W&B init output
+                )
+                metrics = self.metrics_collector.get_metrics_from_log(log_content)
                 if metrics is None:
                     logger.error("Failed to get metrics from W&B")
                     self.store.set_run_status(run_id, "failed")
@@ -475,6 +479,7 @@ class RevisLoop:
             self.tool_executor.config_changes = []
             self.tool_executor.next_command = None
             self.tool_executor.code_change_request = None
+            self.tool_executor.files_modified = []
             self.tool_executor._executor = self.executor
             self.tool_executor._run_output_dir = run_output_dir
 
@@ -625,6 +630,7 @@ class RevisLoop:
         self.tool_executor.config_changes = []
         self.tool_executor.next_command = None
         self.tool_executor.code_change_request = None
+        self.tool_executor.files_modified = []
 
         task = f"""The training run failed. Here's the error:
 

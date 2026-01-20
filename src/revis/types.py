@@ -101,9 +101,9 @@ class Artifact(BaseModel):
 
 
 class Decision(BaseModel):
-    """A decision made by the LLM (legacy, kept for backward compatibility)."""
+    """A decision made by the LLM."""
 
-    action_type: Literal["code_patch", "escalate"]
+    action_type: Literal["config", "cli_args", "code_handoff", "code_patch", "escalate"]
     rationale: str
     commit_sha: str | None = None
 

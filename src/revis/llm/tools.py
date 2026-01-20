@@ -204,6 +204,7 @@ class ToolExecutor:
         self.config_changes: list[dict] = []
         self.next_command: str | None = None
         self.code_change_request: dict | None = None
+        self.files_modified: list[str] = []
 
     def is_denied(self, path: str) -> bool:
         """Check if path matches any deny pattern."""
@@ -451,6 +452,8 @@ class ToolExecutor:
                 return "Writing TOML not supported"
 
             full_path.write_text(new_content)
+            if path not in self.files_modified:
+                self.files_modified.append(path)
             return f"Modified {path}: {key} = {old_value} → {new_value}"
 
         except Exception as e:

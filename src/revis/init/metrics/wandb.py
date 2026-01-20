@@ -1,7 +1,10 @@
 """Weights & Biases metrics source implementation."""
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class WandbMetricsSource:
@@ -31,13 +34,16 @@ class WandbMetricsSource:
         """Connect to W&B API."""
         try:
             import wandb
+        except ImportError:
+            logger.warning("wandb package not installed - run 'pip install wandb'")
+            return False
 
+        try:
             self._api = wandb.Api()
             self._entity = self._api.default_entity
             return True
-        except ImportError:
-            return False
-        except Exception:
+        except Exception as e:
+            logger.warning(f"W&B connection failed: {e}")
             return False
 
     def list_projects(self) -> list[str]:
