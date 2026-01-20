@@ -42,9 +42,7 @@ def setup_logging(verbose: bool = False, session_name: str | None = None):
     If session_name is provided, also logs to .revis/logs/<session_name>.log
     """
     level = logging.DEBUG if verbose else logging.INFO
-    handlers: list[logging.Handler] = [
-        RichHandler(console=console, rich_tracebacks=True)
-    ]
+    handlers: list[logging.Handler] = [RichHandler(console=console, rich_tracebacks=True)]
 
     # Add file handler for session logs
     if session_name:
@@ -53,10 +51,11 @@ def setup_logging(verbose: bool = False, session_name: str | None = None):
         log_file = log_dir / f"{session_name}.log"
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.DEBUG)  # Always capture debug in file
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        ))
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+            )
+        )
         handlers.append(file_handler)
 
     logging.basicConfig(
@@ -68,6 +67,7 @@ def setup_logging(verbose: bool = False, session_name: str | None = None):
     )
     logging.getLogger("paramiko").setLevel(logging.WARNING)
     logging.getLogger("litellm").setLevel(logging.WARNING)
+
 
 REVIS_DIR = ".revis"
 CONFIG_FILE = "revis.yaml"
@@ -236,23 +236,37 @@ def loop(
     baseline: str | None = typer.Option(None, "--baseline", "-b", help="Baseline run ID"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
     background: bool = typer.Option(False, "--background", "--bg", help="Run in background (tmux)"),
-    _in_tmux: bool = typer.Option(False, "--_in-tmux", hidden=True, help="Internal: already in tmux"),
+    _in_tmux: bool = typer.Option(
+        False, "--_in-tmux", hidden=True, help="Internal: already in tmux"
+    ),
 ):
     """Start the autonomous iteration loop."""
     # Handle background mode - launch in tmux and exit
     if background and not _in_tmux:
         if not shutil.which("tmux"):
-            console.print("[red]Error:[/red] tmux not installed. Install it or run without --background.")
+            console.print(
+                "[red]Error:[/red] tmux not installed. Install it or run without --background."
+            )
             raise typer.Exit(1)
 
         tmux_name = get_tmux_session_name(name)
         if tmux_session_exists(tmux_name):
             console.print(f"[red]Error:[/red] tmux session '{tmux_name}' already exists.")
-            console.print(f"Use 'revis watch {name}' to attach or 'tmux kill-session -t {tmux_name}' to remove it.")
+            console.print(f"Use 'revis watch {name}' or 'tmux kill-session -t {tmux_name}'")
             raise typer.Exit(1)
 
         # Build command to re-run ourselves in tmux
-        cmd_parts = ["revis", "loop", "--name", name, "--budget", budget, "--type", budget_type, "--_in-tmux"]
+        cmd_parts = [
+            "revis",
+            "loop",
+            "--name",
+            name,
+            "--budget",
+            budget,
+            "--type",
+            budget_type,
+            "--_in-tmux",
+        ]
         if baseline:
             cmd_parts.extend(["--baseline", baseline])
         if verbose:
@@ -284,7 +298,9 @@ def loop(
 
     # Validate name
     if not name.replace("-", "").replace("_", "").isalnum():
-        console.print("[red]Error:[/red] Session name must be alphanumeric (dashes/underscores allowed)")
+        console.print(
+            "[red]Error:[/red] Session name must be alphanumeric (dashes/underscores allowed)"
+        )
         raise typer.Exit(1)
 
     # Check for name conflict
@@ -434,9 +450,10 @@ def logs(
             for line in log_lines[-lines:]:
                 console.print(line)
             if tmux_running:
-                console.print(f"\n[dim]Use 'revis watch {name}' to attach live, or 'revis logs {name} -f' to follow[/dim]")
+                console.print(f"\n[dim]Attach: revis watch {name}[/dim]")
             else:
-                console.print(f"\n[dim]Session finished. Showing last {min(lines, len(log_lines))} lines from log file.[/dim]")
+                shown = min(lines, len(log_lines))
+                console.print(f"\n[dim]Session finished. Showing last {shown} lines.[/dim]")
         return
 
     # Fall back to tmux if log file doesn't exist
@@ -445,7 +462,9 @@ def logs(
         raise typer.Exit(1)
 
     if not tmux_running:
-        console.print(f"[red]Error:[/red] No log file '{log_file}' and no tmux session '{tmux_name}' found.")
+        console.print(
+            f"[red]Error:[/red] No log file '{log_file}' and no tmux session '{tmux_name}' found."
+        )
         console.print("The session may not have started, or logs were not captured.")
         raise typer.Exit(1)
 
@@ -470,12 +489,16 @@ def logs(
             text=True,
         )
         console.print(result.stdout)
-        console.print(f"\n[dim]Use 'revis watch {name}' to attach, or 'revis logs {name} -f' to follow[/dim]")
+        console.print(
+            f"\n[dim]Use 'revis watch {name}' to attach, or 'revis logs {name} -f' to follow[/dim]"
+        )
 
 
 @app.command("list")
 def list_sessions(
-    all_sessions: bool = typer.Option(False, "--all", "-a", help="Show all sessions including completed"),
+    all_sessions: bool = typer.Option(
+        False, "--all", "-a", help="Show all sessions including completed"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show additional details"),
 ):
     """List all Revis sessions."""
@@ -508,7 +531,9 @@ def list_sessions(
 
         # Budget display
         if session.budget.type == "time":
-            budget_str = f"{format_duration(session.budget.used)}/{format_duration(session.budget.value)}"
+            budget_str = (
+                f"{format_duration(session.budget.used)}/{format_duration(session.budget.value)}"
+            )
         else:
             budget_str = f"{session.budget.used}/{session.budget.value} runs"
 
@@ -523,10 +548,12 @@ def list_sessions(
         ]
 
         if verbose:
-            row.extend([
-                session.branch,
-                session.started_at.strftime("%Y-%m-%d %H:%M"),
-            ])
+            row.extend(
+                [
+                    session.branch,
+                    session.started_at.strftime("%Y-%m-%d %H:%M"),
+                ]
+            )
 
         table.add_row(*row)
 
@@ -569,7 +596,9 @@ def show(
     # Budget
     console.print("\n[bold]Budget:[/bold]")
     if session.budget.type == "time":
-        console.print(f"  Time: {format_duration(session.budget.used)} / {format_duration(session.budget.value)}")
+        used = format_duration(session.budget.used)
+        total = format_duration(session.budget.value)
+        console.print(f"  Time: {used} / {total}")
     else:
         console.print(f"  Runs: {session.budget.used} / {session.budget.value}")
     console.print(f"  LLM Cost: ${session.llm_cost_usd:.2f}")
@@ -616,7 +645,9 @@ def _show_runs_table(store, runs: list, iteration_count: int) -> None:
         elif run.started_at:
             duration_str = "running..."
 
-        status_style = {"completed": "green", "failed": "red", "running": "yellow"}.get(run.status, "white")
+        status_style = {"completed": "green", "failed": "red", "running": "yellow"}.get(
+            run.status, "white"
+        )
 
         table.add_row(
             str(run.iteration_number),
@@ -697,11 +728,15 @@ def pr(
         raise typer.Exit(1)
 
     if session.status == "running":
-        console.print("[red]Error:[/red] Cannot export running session. Stop it first with 'revis stop'.")
+        console.print(
+            "[red]Error:[/red] Cannot export running session. Stop it first with 'revis stop'."
+        )
         raise typer.Exit(1)
 
     if session.exported_at and not force:
-        console.print(f"[yellow]Warning:[/yellow] Session already exported at {session.exported_at}")
+        console.print(
+            f"[yellow]Warning:[/yellow] Session already exported at {session.exported_at}"
+        )
         if session.pr_url:
             console.print(f"  PR: {session.pr_url}")
         if not typer.confirm("Export again?"):
@@ -768,7 +803,8 @@ def pr(
 
             title = f"Revis/{session.name}"
             if session.termination_reason:
-                title = f"Revis/{session.name}: {session.termination_reason.value.replace('_', ' ').title()}"
+                reason = session.termination_reason.value.replace("_", " ").title()
+                title = f"Revis/{session.name}: {reason}"
 
             body = format_pr_body(
                 session=session,
@@ -821,7 +857,7 @@ def delete(
             console.print(f"[red]Error:[/red] Session '{name}' not found.")
             raise typer.Exit(1)
         if session.status == "running" and not force:
-            console.print(f"[red]Error:[/red] Cannot delete running session '{name}'. Stop it first or use --force.")
+            console.print(f"[red]Error:[/red] Session '{name}' is running. Use --force.")
             raise typer.Exit(1)
         sessions_to_delete.append(session)
 
@@ -844,7 +880,7 @@ def delete(
         # Delete git branch if requested
         if not keep_branch:
             if current_branch == session.branch:
-                console.print(f"[yellow]Warning:[/yellow] Cannot delete branch '{session.branch}' - currently checked out.")
+                console.print(f"[yellow]Warning:[/yellow] Branch '{session.branch}' is checked out")
             elif git.branch_exists(session.branch):
                 try:
                     git._run("branch", "-D", session.branch)
@@ -989,7 +1025,9 @@ def compare(
     table.add_column(f"Iteration {iter1}")
     table.add_column(f"Iteration {iter2}")
 
-    table.add_row("Change", run1.change_description or "initial", run2.change_description or "initial")
+    table.add_row(
+        "Change", run1.change_description or "initial", run2.change_description or "initial"
+    )
     table.add_row("Outcome", run1.outcome or "-", run2.outcome or "-")
 
     all_metric_names = sorted(set(metrics1.keys()) | set(metrics2.keys()))
@@ -1057,17 +1095,19 @@ def export_data(
                 db_metrics = store.get_run_metrics(run.id)
                 metrics = {m.name: m.value for m in db_metrics}
 
-            data["iterations"].append({
-                "number": run.iteration_number,
-                "change_type": run.change_type,
-                "change_description": run.change_description,
-                "hypothesis": run.hypothesis,
-                "outcome": run.outcome,
-                "analysis": run.analysis,
-                "metrics": metrics,
-                "started_at": run.started_at.isoformat() if run.started_at else None,
-                "ended_at": run.ended_at.isoformat() if run.ended_at else None,
-            })
+            data["iterations"].append(
+                {
+                    "number": run.iteration_number,
+                    "change_type": run.change_type,
+                    "change_description": run.change_description,
+                    "hypothesis": run.hypothesis,
+                    "outcome": run.outcome,
+                    "analysis": run.analysis,
+                    "metrics": metrics,
+                    "started_at": run.started_at.isoformat() if run.started_at else None,
+                    "ended_at": run.ended_at.isoformat() if run.ended_at else None,
+                }
+            )
 
         print(json.dumps(data, indent=2))
 
@@ -1092,8 +1132,11 @@ def export_data(
             all_metric_names.update(metrics.keys())
 
         fieldnames = [
-            "iteration", "change_type", "change_description",
-            "hypothesis", "outcome",
+            "iteration",
+            "change_type",
+            "change_description",
+            "hypothesis",
+            "outcome",
         ] + sorted(all_metric_names)
 
         output = io.StringIO()

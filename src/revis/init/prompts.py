@@ -65,9 +65,7 @@ def prompt_metrics_source() -> tuple[str, WandbMetricsSource | EvalJsonMetricsSo
     if wandb_available:
         choices.append(Choice(value="wandb", name="Weights & Biases"))
     else:
-        choices.append(
-            Choice(value="wandb_disabled", name="Weights & Biases (no auth detected)")
-        )
+        choices.append(Choice(value="wandb_disabled", name="Weights & Biases (no auth detected)"))
 
     choices.append(Choice(value="eval_json", name="eval.json (manual)"))
 
@@ -175,9 +173,7 @@ def prompt_executor() -> tuple[str, SSHHost | None]:
 
     if ssh_hosts:
         for host in ssh_hosts[:10]:
-            choices.append(
-                Choice(value=host, name=f"{host.name} (from ~/.ssh/config)")
-            )
+            choices.append(Choice(value=host, name=f"{host.name} (from ~/.ssh/config)"))
 
     choices.append(Choice(value="ssh_manual", name="Remote SSH (enter manually)"))
 
@@ -222,17 +218,17 @@ def prompt_coding_agent() -> str:
 
     choices = []
     if detected:
-        choices.append(
-            Choice(value="auto", name=f"auto ({detected} detected)")
-        )
+        choices.append(Choice(value="auto", name=f"auto ({detected} detected)"))
     else:
         choices.append(Choice(value="auto", name="auto (none detected)"))
 
-    choices.extend([
-        Choice(value="claude-code", name="claude-code"),
-        Choice(value="aider", name="aider"),
-        Choice(value="none", name="none (pause for manual changes)"),
-    ])
+    choices.extend(
+        [
+            Choice(value="claude-code", name="claude-code"),
+            Choice(value="aider", name="aider"),
+            Choice(value="none", name="none (pause for manual changes)"),
+        ]
+    )
 
     return inquirer.select(
         message="Coding agent (for code changes):",

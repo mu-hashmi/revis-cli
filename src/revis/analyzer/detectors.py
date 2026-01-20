@@ -62,7 +62,7 @@ def detect_divergence(
         return GuardrailResult(
             triggered=True,
             guardrail="divergence_detection",
-            message=f"Divergence detected: {current_value:.4f} > {threshold:.4f} ({multiplier}× initial)",
+            message=f"Divergence: {current_value:.4f} > {threshold:.4f} ({multiplier}× init)",
             severity="error",
         )
 
@@ -101,7 +101,7 @@ def detect_plateau(
         return GuardrailResult(
             triggered=True,
             guardrail="plateau_detection",
-            message=f"Plateau detected: {improvement:.2%} improvement over last {n_runs} runs (threshold: {threshold:.2%})",
+            message=f"Plateau: {improvement:.2%} over {n_runs} runs (need {threshold:.2%})",
             severity="warning",
         )
 

@@ -55,7 +55,11 @@ class RunAnalyzer:
             if previous_value is not None:
                 delta_prev = current_value - previous_value
                 if previous_value != 0:
-                    improvement_prev = -delta_prev / abs(previous_value) if self.minimize else delta_prev / abs(previous_value)
+                    improvement_prev = (
+                        -delta_prev / abs(previous_value)
+                        if self.minimize
+                        else delta_prev / abs(previous_value)
+                    )
 
         baseline_value = None
         delta_base = None
@@ -66,7 +70,11 @@ class RunAnalyzer:
             if baseline_value is not None:
                 delta_base = current_value - baseline_value
                 if baseline_value != 0:
-                    improvement_base = -delta_base / abs(baseline_value) if self.minimize else delta_base / abs(baseline_value)
+                    improvement_base = (
+                        -delta_base / abs(baseline_value)
+                        if self.minimize
+                        else delta_base / abs(baseline_value)
+                    )
 
         return RunComparison(
             current_value=current_value,
@@ -110,6 +118,7 @@ class RunAnalyzer:
         plateau_detected = False
         if len(history) >= 3:  # Need at least 3 runs
             from revis.analyzer.detectors import detect_plateau
+
             result = detect_plateau(
                 history + [current_eval.metrics.get(self.primary_metric, 0.0)],
                 threshold=0.01,
@@ -158,16 +167,20 @@ class RunAnalyzer:
                     delta = value - prev_metrics[name]
                     pct = (delta / abs(prev_metrics[name]) * 100) if prev_metrics[name] != 0 else 0
                     sign = "+" if delta > 0 else ""
-                    result_parts.append(f"{name}: {prev_metrics[name]:.4f} → {value:.4f} ({sign}{pct:.1f}%)")
+                    result_parts.append(
+                        f"{name}: {prev_metrics[name]:.4f} → {value:.4f} ({sign}{pct:.1f}%)"
+                    )
                 else:
                     result_parts.append(f"{name}: {value:.4f}")
 
-            summaries.append(RunSummary(
-                iteration=run.iteration_number,
-                metrics=metrics,
-                change_summary=change_summary,
-                result_summary=", ".join(result_parts) if result_parts else "No metrics",
-            ))
+            summaries.append(
+                RunSummary(
+                    iteration=run.iteration_number,
+                    metrics=metrics,
+                    change_summary=change_summary,
+                    result_summary=", ".join(result_parts) if result_parts else "No metrics",
+                )
+            )
 
             prev_metrics = metrics
 

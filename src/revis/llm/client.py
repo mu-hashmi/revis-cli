@@ -190,15 +190,17 @@ class LLMClient:
                 if message.tool_calls:
                     tool_calls = []
                     for tc in message.tool_calls:
-                        tool_calls.append({
-                            "id": tc.id,
-                            "name": tc.function.name,
-                            "arguments": (
-                                tc.function.arguments
-                                if isinstance(tc.function.arguments, dict)
-                                else self._parse_json_safe(tc.function.arguments)
-                            ),
-                        })
+                        tool_calls.append(
+                            {
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "arguments": (
+                                    tc.function.arguments
+                                    if isinstance(tc.function.arguments, dict)
+                                    else self._parse_json_safe(tc.function.arguments)
+                                ),
+                            }
+                        )
 
                 if is_fallback:
                     logger.info(f"Used fallback model {model} after primary failed")
@@ -225,6 +227,7 @@ class LLMClient:
         """Parse JSON string, returning empty dict on failure."""
         try:
             import json
+
             return json.loads(s)
         except (json.JSONDecodeError, TypeError):
             return {}

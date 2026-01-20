@@ -346,16 +346,35 @@ class ToolExecutor:
         if not log_content.strip():
             return "(no training logs found)"
 
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        log_content = ansi_escape.sub('', log_content)
+        ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+        log_content = ansi_escape.sub("", log_content)
 
         lines = log_content.strip().split("\n")
 
         if filter == "errors":
-            patterns = ["error", "warning", "exception", "traceback", "failed", "oom", "nan", "cuda"]
+            patterns = [
+                "error",
+                "warning",
+                "exception",
+                "traceback",
+                "failed",
+                "oom",
+                "nan",
+                "cuda",
+            ]
             lines = [line for line in lines if any(p in line.lower() for p in patterns)]
         elif filter == "metrics":
-            patterns = ["loss", "accuracy", "acc", "epoch", "step", "lr=", "learning_rate", "val_", "train_"]
+            patterns = [
+                "loss",
+                "accuracy",
+                "acc",
+                "epoch",
+                "step",
+                "lr=",
+                "learning_rate",
+                "val_",
+                "train_",
+            ]
             lines = [line for line in lines if any(p in line.lower() for p in patterns)]
             if len(lines) > 50:
                 step = len(lines) // 50
@@ -393,6 +412,7 @@ class ToolExecutor:
             elif suffix == ".toml":
                 try:
                     import tomllib
+
                     data = tomllib.loads(content)
                 except ImportError:
                     return "TOML support requires Python 3.11+"
@@ -414,12 +434,14 @@ class ToolExecutor:
             new_value = self._parse_value(value, type(old_value))
             current[final_key] = new_value
 
-            self.config_changes.append({
-                "path": path,
-                "key": key,
-                "old_value": old_value,
-                "new_value": new_value,
-            })
+            self.config_changes.append(
+                {
+                    "path": path,
+                    "key": key,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                }
+            )
 
             if suffix in (".yaml", ".yml"):
                 new_content = yaml.dump(data, default_flow_style=False, sort_keys=False)

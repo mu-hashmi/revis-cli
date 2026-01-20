@@ -63,16 +63,13 @@ class SQLiteRunStore:
         if "name" not in session_columns:
             self._conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT UNIQUE")
             self._conn.execute("ALTER TABLE sessions ADD COLUMN exported_at TIMESTAMP")
-            self._conn.execute(
-                "UPDATE sessions SET name = 'session-' || id WHERE name IS NULL"
-            )
+            self._conn.execute("UPDATE sessions SET name = 'session-' || id WHERE name IS NULL")
             self._conn.commit()
 
         if "config_snapshot" not in session_columns:
             self._conn.execute("ALTER TABLE sessions ADD COLUMN config_snapshot TEXT")
             self._conn.commit()
 
-        # Run migrations - add new columns for iteration tracking
         cursor = self._conn.execute("PRAGMA table_info(runs)")
         run_columns = [row[1] for row in cursor.fetchall()]
 
@@ -118,9 +115,7 @@ class SQLiteRunStore:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_suggestions_session ON suggestions(session_id)"
         )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_suggestions_run ON suggestions(run_id)"
-        )
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_suggestions_run ON suggestions(run_id)")
         self.conn.commit()
 
     # Session management
@@ -179,9 +174,7 @@ class SQLiteRunStore:
         self.conn.commit()
 
     def get_session(self, session_id: str) -> Session | None:
-        row = self.conn.execute(
-            "SELECT * FROM sessions WHERE id = ?", (session_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             return None
         return self._row_to_session(row)
@@ -195,9 +188,7 @@ class SQLiteRunStore:
         return self._row_to_session(row)
 
     def get_session_by_name(self, name: str) -> Session | None:
-        row = self.conn.execute(
-            "SELECT * FROM sessions WHERE name = ?", (name,)
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM sessions WHERE name = ?", (name,)).fetchone()
         if row is None:
             return None
         return self._row_to_session(row)
@@ -250,16 +241,12 @@ class SQLiteRunStore:
         self.conn.commit()
 
     def session_name_exists(self, name: str) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM sessions WHERE name = ? LIMIT 1", (name,)
-        ).fetchone()
+        row = self.conn.execute("SELECT 1 FROM sessions WHERE name = ? LIMIT 1", (name,)).fetchone()
         return row is not None
 
     def get_orphaned_sessions(self) -> list[Session]:
         """Get sessions marked as running but whose process is dead."""
-        rows = self.conn.execute(
-            "SELECT * FROM sessions WHERE status = 'running'"
-        ).fetchall()
+        rows = self.conn.execute("SELECT * FROM sessions WHERE status = 'running'").fetchall()
 
         orphaned = []
         for row in rows:
@@ -317,14 +304,10 @@ class SQLiteRunStore:
             baseline_run_id=row["baseline_run_id"],
             status=row["status"],
             termination_reason=(
-                TerminationReason(row["termination_reason"])
-                if row["termination_reason"]
-                else None
+                TerminationReason(row["termination_reason"]) if row["termination_reason"] else None
             ),
             started_at=datetime.fromisoformat(row["started_at"]),
-            ended_at=(
-                datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
-            ),
+            ended_at=(datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None),
             budget=Budget(
                 type=row["budget_type"],
                 value=row["budget_value"],
@@ -485,12 +468,8 @@ class SQLiteRunStore:
             config_json=row["config_json"],
             git_sha=row["git_sha"],
             status=row["status"],
-            started_at=(
-                datetime.fromisoformat(row["started_at"]) if row["started_at"] else None
-            ),
-            ended_at=(
-                datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
-            ),
+            started_at=(datetime.fromisoformat(row["started_at"]) if row["started_at"] else None),
+            ended_at=(datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None),
             exit_code=row["exit_code"],
             change_type=row_dict.get("change_type"),
             change_description=row_dict.get("change_description"),
@@ -553,13 +532,13 @@ class SQLiteRunStore:
         self.conn.commit()
 
     def get_traces(self, run_id: str) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT timestamp, event_type, data_json FROM traces WHERE run_id = ? ORDER BY timestamp",
-            (run_id,),
-        ).fetchall()
+        query = """
+            SELECT timestamp, event_type, data_json FROM traces
+            WHERE run_id = ? ORDER BY timestamp
+        """
+        rows = self.conn.execute(query, (run_id,)).fetchall()
         return [
-            {"timestamp": row[0], "event_type": row[1], "data": json.loads(row[2])}
-            for row in rows
+            {"timestamp": row[0], "event_type": row[1], "data": json.loads(row[2])} for row in rows
         ]
 
     # Iteration tracking (new fields on runs)
@@ -662,9 +641,7 @@ class SQLiteRunStore:
             id=row["id"],
             session_id=row["session_id"],
             run_id=row["run_id"],
-            created_at=(
-                datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
-            ),
+            created_at=(datetime.fromisoformat(row["created_at"]) if row["created_at"] else None),
             suggestion_type=row["suggestion_type"],
             content=row["content"],
             status=row["status"],

@@ -8,7 +8,8 @@ from revis.types import EvalResult
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are Revis, an autonomous ML training optimizer. Your job is to analyze training results and propose changes to improve model metrics.
+SYSTEM_PROMPT = """You are Revis, an autonomous ML training optimizer. You analyze training \
+results and propose changes to improve model metrics.
 
 ## What you receive
 
@@ -114,7 +115,7 @@ def build_log_tail_section(log_tail: str, lines: int = 200) -> str:
         log_lines = log_lines[-lines:]
 
     return (
-        f"<training_log_tail lines=\"{len(log_lines)}\">\n"
+        f'<training_log_tail lines="{len(log_lines)}">\n'
         + "\n".join(log_lines)
         + "\n</training_log_tail>"
     )
@@ -181,10 +182,14 @@ def build_iteration_context(
     Training logs are available via the get_training_logs tool.
     """
     history_section = build_history_section(run_summaries)
-    current_run_section = build_current_run_section(eval_result, primary_metric, baseline_value, target_value, minimize)
+    current_run_section = build_current_run_section(
+        eval_result, primary_metric, baseline_value, target_value, minimize
+    )
     analysis_section = build_analysis_section(guardrail_results, metric_delta, primary_metric)
 
-    logger.debug(f"Context section sizes: history={len(history_section)}, current_run={len(current_run_section)}, analysis={len(analysis_section)}")
+    logger.debug(
+        f"Context section sizes: history={len(history_section)}, current_run={len(current_run_section)}, analysis={len(analysis_section)}"
+    )
 
     sections = [history_section, current_run_section, analysis_section]
 

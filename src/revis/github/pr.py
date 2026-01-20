@@ -202,7 +202,7 @@ def format_pr_body(
     # Build metrics table
     metrics_table = f"""| Metric | Baseline | Final | Δ |
 |--------|----------|-------|---|
-| {primary_metric} | {baseline_value or 'N/A'} | {final_value or 'N/A'} | {improvement_str} |"""
+| {primary_metric} | {baseline_value or "N/A"} | {final_value or "N/A"} | {improvement_str} |"""
 
     # Build key iterations table
     key_iterations = []
@@ -216,20 +216,24 @@ def format_pr_body(
         if len(rationale) > 50:
             rationale = rationale[:47] + "..."
 
-        key_iterations.append(
-            f"| {run.iteration_number} | {run.git_sha[:7] if run.git_sha else 'N/A'} | {metric_val} | {rationale} |"
-        )
+        sha = run.git_sha[:7] if run.git_sha else "N/A"
+        key_iterations.append(f"| {run.iteration_number} | {sha} | {metric_val} | {rationale} |")
 
-    iterations_table = """| # | Commit | """ + primary_metric + """ | Rationale |
+    iterations_table = (
+        """| # | Commit | """
+        + primary_metric
+        + """ | Rationale |
 |---|--------|-----|-----------|
-""" + "\n".join(key_iterations)
+"""
+        + "\n".join(key_iterations)
+    )
 
     # Build body
     body = f"""## Session Summary
 
 **Result**: {result}
 **Branch**: `{session.branch}`
-**Termination**: {session.termination_reason.value if session.termination_reason else 'N/A'}
+**Termination**: {session.termination_reason.value if session.termination_reason else "N/A"}
 
 ### Metrics
 

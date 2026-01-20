@@ -109,7 +109,7 @@ class SSHExecutor:
         work_dir = self._expand_path(self.config.work_dir)
 
         # Build environment exports (each var needs separate export for safety)
-        env_exports = " && ".join(f"export {k}=\"{v}\"" for k, v in env.items())
+        env_exports = " && ".join(f'export {k}="{v}"' for k, v in env.items())
         if env_exports:
             env_exports = f"{env_exports} && "
 
@@ -146,7 +146,9 @@ class SSHExecutor:
             # Check if session still exists
             if not self.is_running(process_id):
                 # Session ended, check exit file
-                exit_code, content, _ = self._exec(f"cat {exit_file} 2>/dev/null && rm -f {exit_file}")
+                exit_code, content, _ = self._exec(
+                    f"cat {exit_file} 2>/dev/null && rm -f {exit_file}"
+                )
                 if exit_code == 0 and "EXIT_CODE=" in content:
                     code = int(content.split("EXIT_CODE=")[1].strip())
                     return ExitResult(
@@ -207,9 +209,7 @@ class SSHExecutor:
 
     def get_tmux_output(self, session_name: str, lines: int = 200) -> str:
         """Get output from tmux pane."""
-        exit_code, output, _ = self._exec(
-            f"tmux capture-pane -t {session_name} -p -S -{lines}"
-        )
+        exit_code, output, _ = self._exec(f"tmux capture-pane -t {session_name} -p -S -{lines}")
         return output if exit_code == 0 else ""
 
     # Code sync
@@ -234,7 +234,8 @@ class SSHExecutor:
             "--exclude=*.pyc",
             "--exclude=.venv",
             "--exclude=venv",
-            "-e", f"ssh -p {self.config.port}",
+            "-e",
+            f"ssh -p {self.config.port}",
             f"{local_path}/",
             f"{self.config.user}@{self.config.host}:{remote_path}/",
         ]

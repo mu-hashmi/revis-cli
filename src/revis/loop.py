@@ -101,22 +101,25 @@ class RevisLoop:
         self.repo_path = repo_path
         self.console = console
 
-        # Track active training process for cleanup
         self._active_process_id: str | None = None
 
         # Initialize executor based on type
         if config.executor.type == "local":
-            self.executor: Executor = LocalExecutor(LocalConfig(
-                work_dir=config.executor.work_dir,
-            ))
+            self.executor: Executor = LocalExecutor(
+                LocalConfig(
+                    work_dir=config.executor.work_dir,
+                )
+            )
         else:
-            self.executor = SSHExecutor(SSHConfig(
-                host=config.executor.host,
-                user=config.executor.user,
-                port=config.executor.port,
-                key_path=config.executor.key_path,
-                work_dir=config.executor.work_dir,
-            ))
+            self.executor = SSHExecutor(
+                SSHConfig(
+                    host=config.executor.host,
+                    user=config.executor.user,
+                    port=config.executor.port,
+                    key_path=config.executor.key_path,
+                    work_dir=config.executor.work_dir,
+                )
+            )
 
         self.llm = LLMClient(config.llm)
         self.git = GitManager(GitConfig(repo_path=repo_path))
@@ -147,6 +150,7 @@ class RevisLoop:
         if self.config.metrics.source == "wandb":
             try:
                 from revis.metrics.wandb import WandbCollector
+
                 return WandbCollector(
                     project=self.config.metrics.project,
                     entity=self.config.metrics.entity,
@@ -199,7 +203,6 @@ class RevisLoop:
         else:
             self.git.checkout(session.branch)
 
-        # Track start time for time-based budget
         start_time = time.time()
 
         try:
@@ -272,15 +275,19 @@ class RevisLoop:
             run_env = collect_training_env(self.config, self.repo_path)
 
             # Add Revis-specific env vars (these take precedence)
-            run_env.update({
-                "REVIS_OUTPUT_DIR": run_output_dir,
-                "REVIS_RUN_ID": run_id,
-                "REVIS_SESSION_ID": session.id,
-            })
+            run_env.update(
+                {
+                    "REVIS_OUTPUT_DIR": run_output_dir,
+                    "REVIS_RUN_ID": run_id,
+                    "REVIS_SESSION_ID": session.id,
+                }
+            )
 
-            # Redirect output to log file in run output dir
-            # Use pipefail so exit code reflects training failure, not tee success
-            train_cmd = f"set -o pipefail; mkdir -p {run_output_dir} && {train_cmd} 2>&1 | tee {run_output_dir}/train.log"
+            # Redirect to log file, pipefail preserves training exit code
+            log_path = f"{run_output_dir}/train.log"
+            train_cmd = (
+                f"set -o pipefail; mkdir -p {run_output_dir} && {train_cmd} 2>&1 | tee {log_path}"
+            )
 
             logger.info(f"Launching training: {train_cmd}")
             logger.info(f"Run output dir: {run_output_dir}")
@@ -307,16 +314,18 @@ class RevisLoop:
                 if new_retry <= 0:
                     return self._terminate(session, TerminationReason.RETRY_EXHAUSTION, base_branch)
 
-                # Run agent to try to fix
-                error_context = f"Training launch failed with error:\n{e}\n\nPlease investigate and fix the issue."
+                error_context = f"Training launch failed:\n{e}\n\nInvestigate and fix."
                 agent_result = self._run_agent_for_fix(error_context, run_id)
                 if agent_result and agent_result.files_modified:
                     sha = self.git.commit(f"Revis fix: {agent_result.rationale}")
-                    self.store.attach_decision(run_id, Decision(
-                        action_type="code_patch",
-                        rationale=agent_result.rationale,
-                        commit_sha=sha,
-                    ))
+                    self.store.attach_decision(
+                        run_id,
+                        Decision(
+                            action_type="code_patch",
+                            rationale=agent_result.rationale,
+                            commit_sha=sha,
+                        ),
+                    )
                 continue
 
             # Handle run failure
@@ -336,18 +345,23 @@ class RevisLoop:
                     f"{run_output_dir}/train.log",
                     self.config.context.log_tail_lines,
                 )
-                error_context = f"Training failed with exit code {result.exit_code}\n\nLog tail:\n{log_tail}\n\nPlease investigate and fix the issue."
+                error_context = f"Training failed (exit {result.exit_code}):\n{log_tail}"
                 agent_result = self._run_agent_for_fix(error_context, run_id)
                 if agent_result:
                     if agent_result.escalate:
-                        return self._terminate(session, TerminationReason.LLM_ESCALATION, base_branch)
+                        return self._terminate(
+                            session, TerminationReason.LLM_ESCALATION, base_branch
+                        )
                     if agent_result.files_modified:
                         sha = self.git.commit(f"Revis fix: {agent_result.rationale}")
-                        self.store.attach_decision(run_id, Decision(
-                            action_type="code_patch",
-                            rationale=agent_result.rationale,
-                            commit_sha=sha,
-                        ))
+                        self.store.attach_decision(
+                            run_id,
+                            Decision(
+                                action_type="code_patch",
+                                rationale=agent_result.rationale,
+                                commit_sha=sha,
+                            ),
+                        )
                 continue
 
             self.store.set_run_status(run_id, "completed")
@@ -374,10 +388,14 @@ class RevisLoop:
                 eval_path = f"{run_output_dir}/eval.json"
                 try:
                     import json as json_mod
+
                     content = self.executor.read_file(eval_path)
                     data = json_mod.loads(content)
-                    metrics = {k: float(v) for k, v in data.get("metrics", {}).items()
-                               if isinstance(v, (int, float))}
+                    metrics = {
+                        k: float(v)
+                        for k, v in data.get("metrics", {}).items()
+                        if isinstance(v, (int, float))
+                    }
                     eval_result = EvalResult(metrics=metrics)
                 except (FileNotFoundError, json.JSONDecodeError) as e:
                     logger.error(f"Failed to read eval.json: {e}")
@@ -482,7 +500,9 @@ class RevisLoop:
                 max_iterations=self.config.context.max_agent_iterations,
                 tracer=tracer,
             )
-            tracer.on_iteration_complete(iteration, agent_result.rationale, agent_result.significant)
+            tracer.on_iteration_complete(
+                iteration, agent_result.rationale, agent_result.significant
+            )
             self.store.update_session_cost(session.id, self.llm.total_cost)
             logger.info(f"Agent finished (cost so far: ${self.llm.total_cost:.2f})")
 
@@ -543,9 +563,7 @@ class RevisLoop:
                     handoff_result = self.coding_agent.handoff(handoff_context)
 
                     if handoff_result.success:
-                        change_descriptions.append(
-                            f"[code] {request['suggestion'][:50]}..."
-                        )
+                        change_descriptions.append(f"[code] {request['suggestion'][:50]}...")
                         # Update suggestion status
                         suggestion.status = "accepted"
                         suggestion.handed_off_to = self.config.coding_agent.type
@@ -578,11 +596,14 @@ class RevisLoop:
                 logger.info(f"Committed {sha[:7]}: {agent_result.rationale}")
 
                 # Record decision
-                self.store.attach_decision(run_id, Decision(
-                    action_type=change_type,
-                    rationale=agent_result.rationale,
-                    commit_sha=sha,
-                ))
+                self.store.attach_decision(
+                    run_id,
+                    Decision(
+                        action_type=change_type,
+                        rationale=agent_result.rationale,
+                        commit_sha=sha,
+                    ),
+                )
 
             # Update training command if agent specified one for next iteration
             if has_command_change:
@@ -635,9 +656,9 @@ RATIONALE: <what you fixed and why>
 
         # Check if any changes were made
         has_changes = (
-            len(self.tool_executor.config_changes) > 0 or
-            self.tool_executor.next_command is not None or
-            self.tool_executor.code_change_request is not None
+            len(self.tool_executor.config_changes) > 0
+            or self.tool_executor.next_command is not None
+            or self.tool_executor.code_change_request is not None
         )
         agent_result.files_modified = ["config_changed"] if has_changes else []
 
@@ -675,7 +696,6 @@ RATIONALE: <what you fixed and why>
         # For now, use 'main' as default, but ideally this would be stored
         base_branch = "main"
 
-        # Track start time for time-based budget
         start_time = time.time()
 
         logger.info(f"Resuming session '{session.name}' (ID: {session.id})")

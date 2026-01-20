@@ -42,7 +42,7 @@ class LocalExecutor:
         session_name: str,
     ) -> str:
         """Launch command in local tmux session."""
-        env_exports = " && ".join(f"export {k}=\"{v}\"" for k, v in env.items())
+        env_exports = " && ".join(f'export {k}="{v}"' for k, v in env.items())
         if env_exports:
             env_exports = f"{env_exports} && "
 
@@ -129,9 +129,7 @@ class LocalExecutor:
 
     def get_tmux_output(self, session_name: str, lines: int = 200) -> str:
         """Get output from tmux pane."""
-        exit_code, output, _ = self._run(
-            f"tmux capture-pane -t {session_name} -p -S -{lines}"
-        )
+        exit_code, output, _ = self._run(f"tmux capture-pane -t {session_name} -p -S -{lines}")
         return output if exit_code == 0 else ""
 
     def sync_code(self, local_path: Path, remote_path: str) -> None:
@@ -146,6 +144,7 @@ class LocalExecutor:
     ) -> list[Path]:
         """Collect artifacts matching patterns."""
         import glob
+
         collected = []
 
         for pattern in patterns:
@@ -158,6 +157,7 @@ class LocalExecutor:
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     if path != dest_path:
                         import shutil
+
                         shutil.copy2(path, dest_path)
                     collected.append(dest_path)
 
