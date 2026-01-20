@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-wandb = ["wandb>=0.15.0"]
+wandb = ["wandb>=0.18.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
