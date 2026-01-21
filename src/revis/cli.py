@@ -1055,6 +1055,8 @@ def compare(
 def export_data(
     name: str = typer.Argument(..., help="Session name to export"),
     format: str = typer.Option("json", "--format", "-f", help="Output format: json or csv"),
+    output: str | None = typer.Option(None, "--output", "-o", help="Output file path"),
+    stdout: bool = typer.Option(False, "--stdout", help="Print to stdout instead of file"),
 ):
     """Export session data to JSON or CSV."""
     import csv
@@ -1067,6 +1069,16 @@ def export_data(
     if session is None:
         console.print(f"[red]Error:[/red] Session '{name}' not found.")
         raise typer.Exit(1)
+
+    # Determine output path
+    if stdout:
+        output_path = None
+    elif output:
+        output_path = Path(output)
+    else:
+        export_dir = Path(REVIS_DIR) / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        output_path = export_dir / f"{name}.{format}"
 
     runs = store.query_runs(session_id=session.id, limit=1000)
     runs = list(reversed(runs))
@@ -1109,7 +1121,12 @@ def export_data(
                 }
             )
 
-        print(json.dumps(data, indent=2))
+        content = json.dumps(data, indent=2)
+        if output_path:
+            output_path.write_text(content)
+            console.print(f"[green]Exported to:[/green] {output_path}")
+        else:
+            print(content)
 
     elif format == "csv":
         if not runs:
@@ -1154,7 +1171,12 @@ def export_data(
             row.update(run_metrics_cache.get(run.id, {}))
             writer.writerow(row)
 
-        print(output.getvalue())
+        content = output.getvalue()
+        if output_path:
+            output_path.write_text(content)
+            console.print(f"[green]Exported to:[/green] {output_path}")
+        else:
+            print(content)
     else:
         console.print(f"[red]Error:[/red] Unknown format: {format}")
         raise typer.Exit(1)
