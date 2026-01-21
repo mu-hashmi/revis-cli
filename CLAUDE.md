@@ -24,8 +24,8 @@ uv run revis <command>           # Run CLI
 
 Revis is an autonomous ML iteration engine. The core loop:
 1. Run training script (local tmux or remote SSH)
-2. Collect metrics from `eval.json`
-3. LLM agent analyzes results and proposes code changes
+2. Collect metrics (from W&B API or `eval.json`)
+3. LLM agent analyzes results and proposes changes (config or code handoff)
 4. Commit changes and repeat until budget exhausted or target achieved
 
 ### Core Subsystems
@@ -35,7 +35,26 @@ src/revis/
 ├── cli.py           # Typer CLI - all user-facing commands
 ├── loop.py          # RevisLoop - main orchestration
 ├── config.py        # Pydantic config models from revis.yaml
-├── types.py         # Core types: Budget, Session, Run, Decision
+├── types.py         # Core types: Budget, Session, Run, Decision, Suggestion
+│
+├── init/            # Interactive init flow
+│   ├── prompts.py   # InquirerPy interactive prompts
+│   ├── ssh_config.py # Parse ~/.ssh/config for host detection
+│   └── metrics/     # Metrics source detection for init
+│       ├── base.py      # MetricsSource protocol
+│       ├── wandb.py     # W&B project/metric detection
+│       └── eval_json.py # Fallback source
+│
+├── metrics/         # Metrics collection during loop
+│   ├── base.py      # MetricsCollector protocol
+│   ├── wandb.py     # W&B API polling
+│   └── eval_json.py # Read eval.json from training output
+│
+├── agents/          # Coding agent handoff
+│   ├── base.py      # CodingAgent protocol, HandoffContext
+│   ├── claude_code.py # Claude Code CLI integration
+│   ├── aider.py     # Aider CLI integration
+│   └── detect.py    # Auto-detect available agents
 │
 ├── llm/
 │   ├── agent.py     # Tool-calling agentic loop (run_agent)
@@ -51,12 +70,9 @@ src/revis/
 │   ├── compare.py   # RunAnalyzer - compares runs, calculates deltas
 │   └── detectors.py # GuardrailChecker - NaN, divergence, plateau
 │
-├── evaluator/
-│   └── harness.py   # Parses eval.json from training output
-│
 ├── store/
-│   ├── base.py      # RunStore protocol (interface for storage backends)
-│   └── sqlite.py    # SQLiteRunStore implementation (default)
+│   ├── base.py      # RunStore protocol
+│   └── sqlite.py    # SQLiteRunStore with migrations
 │
 └── github/
     └── pr.py        # Git operations & GitHub PR creation
@@ -65,26 +81,37 @@ src/revis/
 ### Key Data Flow
 
 - **Config**: `revis.yaml` → `config.py` → Pydantic models
-- **Storage**: `RunStore` protocol in `store/base.py` defines the interface; SQLite implementation in `store/sqlite.py` (`.revis/revis.db`). Designed to support other backends (S3, GCS, etc.)
+- **Storage**: SQLite in `.revis/revis.db` with runs, suggestions, traces tables
 - **Logs**: `.revis/logs/{session_name}.log` for persistent output
 - **Branches**: `revis/{session_name}` created from base SHA
 
-### LLM Agent Tools
+### LLM Agent Tools (Safe Changes Only)
 
 The agent in `llm/agent.py` uses these tools defined in `llm/tools.py`:
+
+**Read-only tools:**
 - `read_file`: Read files with optional line ranges
-- `write_file`: Complete file content writes (never partial)
 - `list_directory`: List files with optional recursion
 - `search_codebase`: Regex search across codebase
 - `find_definition`: Find function/class definitions
-- `run_command`: Execute shell commands (limited to safe commands like linters/tests)
-- `get_training_logs`: Read training output logs with filters (all/errors/metrics)
+- `get_training_logs`: Read training output logs with filters
 
-File operations respect deny patterns from config (e.g., `.git/**`, `**/__pycache__/**`, `revis.yaml`).
+**Change tools (safe operations only):**
+- `modify_config`: Modify values in YAML/JSON/TOML config files
+- `set_next_command`: Override CLI command for next training run
+- `request_code_change`: Request handoff to coding agent for code changes
 
-### Training Command Override
+The LLM **cannot** write code directly. Code changes are handed off to external coding agents (Claude Code, Aider) or paused for manual intervention.
 
-The `entry.train` command in `revis.yaml` is used for the baseline run. The LLM agent cannot modify `revis.yaml` directly. Instead, if the agent needs to change CLI arguments (e.g., learning rate passed via command line), it can specify `NEXT_COMMAND:` in its response to override the training command for subsequent iterations. This keeps `revis.yaml` as the user-controlled config while allowing the agent to experiment with CLI arguments.
+### Coding Agent Handoff
+
+When the LLM calls `request_code_change`, the loop:
+1. Creates a `Suggestion` record in the database
+2. Builds a `HandoffContext` with iteration history, metrics, and the suggestion
+3. Invokes the configured coding agent (or pauses if `type: none`)
+4. Records the result and commits any changes
+
+Coding agents implement the `CodingAgent` protocol in `agents/base.py`.
 
 ### Session Lifecycle
 
@@ -100,28 +127,44 @@ Sessions can be resumed with `revis resume <name>`.
 ## Configuration (revis.yaml)
 
 Key sections:
-- `executor`: `type: local` or `type: ssh` with host/port
-- `entry_point`: Command to run training (e.g., `python train.py`)
+- `executor`: `type: local` or `type: ssh` with host/port/key
+- `entry.train`: Training command
+- `metrics.source`: `wandb` or `eval_json`
+- `metrics.project/entity`: W&B project settings (if using wandb)
 - `metrics.primary`: Which metric to optimize
 - `metrics.minimize`: Whether lower is better
-- `metrics.target`: Optional target value to stop early
+- `metrics.target`: Optional target value for early stopping
 - `guardrails`: plateau window, timeout, retry budget
-- `context.deny_patterns`: Files agent cannot read
+- `coding_agent.type`: `auto`, `claude-code`, `aider`, or `none`
+- `context.deny`: File patterns agent cannot read
 
 ## CLI Commands
 
 | Command | Purpose |
 |---------|---------|
-| `init` | Initialize `.revis/` and `revis.yaml` |
+| `init` | Interactive setup - creates `revis.yaml` |
 | `loop` | Start iteration loop (supports `--background`) |
 | `resume` | Resume stopped session |
 | `stop` | Graceful stop via signal file |
 | `status` | Show progress (supports `--watch`) |
 | `show` | Show session details (`--trace` for agent tool calls) |
+| `history` | Show iteration history table |
+| `compare` | Compare two iterations side-by-side |
 | `logs` | View session logs |
 | `watch` | Attach to tmux session |
-| `export` | Push branch & create GitHub PR |
+| `export` | Export session data as JSON/CSV |
+| `pr` | Push branch & create GitHub PR |
 | `delete` | Delete session and optionally branch |
+
+## Database Schema
+
+The SQLite store tracks:
+- **sessions**: id, name, branch, status, budget, cost
+- **runs**: id, session_id, iteration, change_type, change_description, hypothesis, metrics, outcome
+- **suggestions**: id, session_id, run_id, type, content, status, handed_off_to
+- **traces**: tool call history for debugging
+
+Run fields track what changed (`change_type`: config, cli_args, code_handoff) and why (`hypothesis`).
 
 ## Code Style
 

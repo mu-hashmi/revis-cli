@@ -10,6 +10,13 @@ pip install revis
 uv add revis
 ```
 
+**With W&B support** (recommended):
+```bash
+pip install revis[wandb]
+# or
+uv add revis --extra wandb
+```
+
 Requires an LLM API key (any provider supported by LiteLLM):
 ```bash
 export ANTHROPIC_API_KEY=sk-...
@@ -171,7 +178,7 @@ Hosts from `~/.ssh/config` are automatically detected during init.
 - Python 3.11+
 - tmux (for local execution)
 - Git repo (changes are committed per iteration)
-- Optional: `wandb` for W&B metrics integration
+- Optional: `pip install revis[wandb]` for W&B metrics integration
 - Optional: `claude` CLI or `aider` for code change handoffs
 
 ## License
