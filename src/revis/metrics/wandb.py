@@ -1,9 +1,46 @@
 """Weights & Biases metrics collector for the training loop."""
 
+import importlib.util
 import logging
 import re
+import sys
 
 logger = logging.getLogger(__name__)
+
+
+def _import_wandb():
+    """Import the real wandb package, avoiding local wandb/ directories.
+
+    Many ML projects have a wandb/ directory where W&B stores run logs.
+    This can shadow the actual wandb package when importing.
+    """
+    import wandb as _wandb
+
+    # Check if we got the real package (has Api class) or a namespace/directory
+    if hasattr(_wandb, "Api"):
+        return _wandb
+
+    # The normal import got a local wandb/ directory - find the real package
+    # Search site-packages for the real wandb installation
+    import os
+
+    for path in sys.path:
+        if "site-packages" in path:
+            wandb_init = os.path.join(path, "wandb", "__init__.py")
+            if os.path.isfile(wandb_init):
+                spec = importlib.util.spec_from_file_location(
+                    "wandb_real", wandb_init,
+                    submodule_search_locations=[os.path.join(path, "wandb")]
+                )
+                if spec and spec.loader:
+                    real_wandb = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(real_wandb)
+                    return real_wandb
+
+    raise ImportError(
+        "wandb is not installed or is shadowed by a local 'wandb/' directory. "
+        "Install wandb with: pip install wandb"
+    )
 
 # Pattern to match W&B run URL in training logs
 # Matches: "🚀 View run at https://wandb.ai/entity/project/runs/abc123"
@@ -22,14 +59,10 @@ class WandbCollector:
 
     def _get_api(self):
         if self._api is None:
-            try:
-                import wandb
-
-                self._api = wandb.Api()
-                if self.entity is None:
-                    self.entity = self._api.default_entity
-            except ImportError:
-                raise ImportError("wandb is not installed. Install with: pip install wandb")
+            wandb = _import_wandb()
+            self._api = wandb.Api()
+            if self.entity is None:
+                self.entity = self._api.default_entity
         return self._api
 
     def parse_run_id_from_log(self, log_content: str) -> str | None:

@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from revis.llm.tools import ToolExecutor
 from revis.llm.tracer import AgentTracer
 from revis.metrics.eval_json import EvalJsonCollector
 from revis.store.sqlite import SQLiteRunStore
-from revis.types import Budget, Decision, EvalResult, Session, Suggestion, TerminationReason
+from revis.types import Budget, Decision, EvalResult, Session, TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -546,14 +547,12 @@ class RevisLoop:
                 request = self.tool_executor.code_change_request
 
                 # Store the suggestion
-                suggestion = Suggestion(
+                suggestion_id = self.store.create_suggestion(
                     session_id=session.id,
-                    run_id=run_id,
                     suggestion_type="code",
                     content=request["suggestion"],
-                    status="pending",
+                    run_id=run_id,
                 )
-                self.store.create_suggestion(suggestion)
 
                 # Hand off to coding agent if available
                 if self.coding_agent is not None:
@@ -569,19 +568,18 @@ class RevisLoop:
 
                     if handoff_result.success:
                         change_descriptions.append(f"[code] {request['suggestion'][:50]}...")
-                        # Update suggestion status
-                        suggestion.status = "accepted"
-                        suggestion.handed_off_to = self.config.coding_agent.type
+                        self.store.update_suggestion_status(
+                            suggestion_id, "accepted", self.config.coding_agent.type
+                        )
                     else:
                         logger.warning(f"Coding agent failed: {handoff_result.error_message}")
-                        suggestion.status = "rejected"
+                        self.store.update_suggestion_status(suggestion_id, "rejected")
                 else:
                     logger.info("No coding agent available - pausing for manual intervention")
                     self.console.print(
                         "[yellow]Code change requested but no coding agent available.[/yellow]"
                     )
                     self.console.print(f"[yellow]Suggestion: {request['suggestion']}[/yellow]")
-                    suggestion.status = "pending"
 
             change_description = "; ".join(change_descriptions) if change_descriptions else None
 
@@ -655,10 +653,10 @@ RATIONALE: <what you fixed and why>
             max_iterations=self.config.context.max_agent_iterations,
             tracer=tracer,
         )
-        self.store.update_session_cost(
-            self.store.query_runs(run_id=run_id)[0].session_id if run_id else "",
-            self.llm.total_cost,
-        )
+        if run_id:
+            run = self.store.get_run(run_id)
+            if run:
+                self.store.update_session_cost(run.session_id, self.llm.total_cost)
 
         # Check if any changes were made
         has_changes = (
@@ -682,8 +680,14 @@ RATIONALE: <what you fixed and why>
         # End session - no PR URL since we're not creating one here
         self.store.end_session(session.id, reason, pr_url=None)
 
-        # Checkout back to base branch
-        self.git.checkout(base_branch)
+        # Checkout back to base branch, handling uncommitted changes
+        try:
+            self.git.checkout(base_branch)
+        except subprocess.CalledProcessError:
+            # Uncommitted changes from failed iteration - stash them and retry
+            logger.warning("Stashing uncommitted changes before checkout")
+            self.git.stash()
+            self.git.checkout(base_branch)
 
         return self.store.get_session(session.id)
 

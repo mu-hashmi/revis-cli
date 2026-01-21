@@ -51,6 +51,10 @@ class GitManager:
         """Checkout existing branch."""
         self._run("checkout", branch_name)
 
+    def stash(self) -> None:
+        """Stash any uncommitted changes."""
+        self._run("stash", "--include-untracked")
+
     def branch_exists(self, branch_name: str) -> bool:
         """Check if branch exists locally or remotely."""
         result = self._run("branch", "-a", "--list", f"*{branch_name}", check=False)
