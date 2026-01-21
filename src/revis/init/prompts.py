@@ -40,10 +40,6 @@ def detect_coding_agent() -> str | None:
     """Detect available coding agents."""
     if shutil.which("claude"):
         return "claude-code"
-    if shutil.which("aider"):
-        return "aider"
-    if shutil.which("codex"):
-        return "codex"
     return None
 
 
@@ -225,7 +221,6 @@ def prompt_coding_agent() -> str:
     choices.extend(
         [
             Choice(value="claude-code", name="claude-code"),
-            Choice(value="aider", name="aider"),
             Choice(value="none", name="none (pause for manual changes)"),
         ]
     )

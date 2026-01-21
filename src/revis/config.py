@@ -57,7 +57,7 @@ class MetricsConfig(BaseModel):
 class CodingAgentConfig(BaseModel):
     """Coding agent configuration for code change handoffs."""
 
-    type: Literal["auto", "claude-code", "aider", "codex", "none"] = "auto"
+    type: Literal["auto", "claude-code", "none"] = "auto"
     auto_handoff: bool = True  # false = pause and ask before handing off
     verify: bool = True  # run smoke test after changes
 
@@ -202,15 +202,36 @@ context:
     - "wandb/**"
     - ".revis/**"
     - "revis.yaml"
+  # constraints: []  # Natural language constraints for the LLM, e.g.:
+  #   - "Learning rate must be between 1e-6 and 1e-2"
+  #   - "Batch size must be a power of 2"
   history: 10
   log_tail_lines: 200
   max_agent_iterations: 20
 
 llm:
-  model: claude-sonnet-4-5-20250929
+  # Uncomment one of the models below (requires corresponding API key in env)
+  # See https://docs.litellm.ai/docs/providers for full list of supported models
+  #
+  # Anthropic (ANTHROPIC_API_KEY)
+  # model: claude-sonnet-4-20250514
+  # model: claude-opus-4-5-20251101
+  # model: claude-haiku-4-5-20251001
+  #
+  # OpenAI (OPENAI_API_KEY)
+  # model: gpt-5.2-2025-12-11
+  # model: gpt-5-mini-2025-08-07
+  # model: gpt-5-nano-2025-08-07
+  #
+  # Google (GEMINI_API_KEY)
+  # model: gemini/gemini-3-pro-preview
+  # model: gemini/gemini-3-flash-preview
+  # model: gemini/gemini-2.5-flash
+  #
+  model: claude-sonnet-4-5-20250929  # default
 
 coding_agent:
-  type: auto  # auto, claude-code, aider, codex, or none
+  type: auto  # auto, claude-code, or none
   auto_handoff: true  # false = pause and ask before handing off
   verify: true  # run smoke test after code changes
 
@@ -290,6 +311,9 @@ def generate_config_yaml(
     lines.append('    - "wandb/**"')
     lines.append('    - ".revis/**"')
     lines.append('    - "revis.yaml"')
+    lines.append("  # constraints: []  # Natural language constraints for the LLM, e.g.:")
+    lines.append('  #   - "Learning rate must be between 1e-6 and 1e-2"')
+    lines.append('  #   - "Batch size must be a power of 2"')
     lines.append("  history: 10")
     lines.append("  log_tail_lines: 200")
     lines.append("  max_agent_iterations: 20")
@@ -297,7 +321,25 @@ def generate_config_yaml(
 
     # LLM
     lines.append("llm:")
-    lines.append("  model: claude-sonnet-4-5-20250929")
+    lines.append("  # Uncomment one of the models below (requires corresponding API key in env)")
+    lines.append("  # See https://docs.litellm.ai/docs/providers for full list of supported models")
+    lines.append("  #")
+    lines.append("  # Anthropic (ANTHROPIC_API_KEY)")
+    lines.append("  # model: claude-sonnet-4-20250514")
+    lines.append("  # model: claude-opus-4-5-20251101")
+    lines.append("  # model: claude-haiku-4-5-20251001")
+    lines.append("  #")
+    lines.append("  # OpenAI (OPENAI_API_KEY)")
+    lines.append("  # model: gpt-5.2-2025-12-11")
+    lines.append("  # model: gpt-5-mini-2025-08-07")
+    lines.append("  # model: gpt-5-nano-2025-08-07")
+    lines.append("  #")
+    lines.append("  # Google (GEMINI_API_KEY)")
+    lines.append("  # model: gemini/gemini-3-pro-preview")
+    lines.append("  # model: gemini/gemini-3-flash-preview")
+    lines.append("  # model: gemini/gemini-2.5-flash")
+    lines.append("  #")
+    lines.append("  model: claude-sonnet-4-5-20250929  # default")
     lines.append("")
 
     # Coding agent

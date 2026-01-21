@@ -162,7 +162,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "request_code_change",
-            "description": "Request a code change that cannot be done via config modification. This will hand off to a coding agent (Claude Code, Aider, etc.) or pause for manual intervention.",
+            "description": "Request a code change that cannot be done via config modification. This will hand off to a coding agent (Claude Code) or pause for manual intervention.",
             "parameters": {
                 "type": "object",
                 "properties": {

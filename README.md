@@ -57,7 +57,6 @@ Execution environment:
 
 Coding agent (for code changes):
   ❯ claude-code (detected)
-    aider
     none (pause for manual changes)
 
 Created revis.yaml
@@ -127,7 +126,7 @@ Revis uses a **safe-by-default** approach:
 
 1. **Config changes**: The LLM can modify YAML/JSON config files directly
 2. **CLI argument changes**: The LLM can change training command arguments
-3. **Code changes**: Handed off to a coding agent (Claude Code, Aider) or paused for manual intervention
+3. **Code changes**: Handed off to a coding agent (Claude Code) or paused for manual intervention
 
 This keeps the LLM focused on experiment iteration while letting specialized tools handle code edits.
 
@@ -135,7 +134,7 @@ Configure coding agent behavior in `revis.yaml`:
 
 ```yaml
 coding_agent:
-  type: auto          # auto, claude-code, aider, or none
+  type: auto          # auto, claude-code, or none
   auto_handoff: true  # false = pause and ask before handing off
   verify: true        # run smoke test after code changes
 ```
@@ -179,7 +178,7 @@ Hosts from `~/.ssh/config` are automatically detected during init.
 - tmux (for local execution)
 - Git repo (changes are committed per iteration)
 - Optional: `pip install revis[wandb]` for W&B metrics integration
-- Optional: `claude` CLI or `aider` for code change handoffs
+- Optional: `claude` CLI for code change handoffs
 
 ## License
 
