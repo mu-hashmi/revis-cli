@@ -146,8 +146,8 @@ Key sections:
 | `resume` | Resume stopped session |
 | `stop` | Graceful stop via signal file |
 | `status` | Show progress (supports `--watch`) |
-| `show` | Show session details (`--trace` for agent tool calls) |
-| `history` | Show iteration history table |
+| `list` | List all sessions (supports `--all`) |
+| `show` | Show session details and iteration history (`--trace` for tool calls) |
 | `compare` | Compare two iterations side-by-side |
 | `logs` | View session logs |
 | `watch` | Attach to tmux session |

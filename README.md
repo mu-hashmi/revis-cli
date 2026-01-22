@@ -32,7 +32,7 @@ revis init
 revis loop --name my-experiment --budget 4h
 ```
 
-The `init` command walks you through setup interactively - no manual YAML editing required:
+The `init` command walks you through setup interactively:
 
 ```
 $ revis init
@@ -56,15 +56,20 @@ Execution environment:
     gpu-server (from ~/.ssh/config)
 
 Coding agent (for code changes):
-  ❯ claude-code (detected)
+  ❯ auto (claude-code detected)
     none (pause for manual changes)
 
-Created revis.yaml
+The LLM can read your repo. Hide any files?
+  ❯ No, allow full access (recommended)
+    Yes, select files to hide
+
+Revis initialized!
+You can edit revis.yaml to adjust settings at any time.
 ```
 
 The loop runs until the budget is exhausted, metrics plateau, or a target is reached.
 
-## What It Does
+## Main Loop
 
 Each iteration:
 1. Runs your training script (local tmux or remote SSH)
@@ -76,8 +81,8 @@ Each iteration:
 When done, you get a git branch with the full iteration history:
 
 ```bash
-# View iteration history
-revis history my-experiment
+# View session details and iteration history
+revis show my-experiment
 
 # Create a PR from the experiment branch
 revis pr my-experiment
@@ -144,13 +149,14 @@ coding_agent:
 | Command | Description |
 |---------|-------------|
 | `revis init` | Interactive setup - creates `revis.yaml` |
-| `revis loop` | Start iteration loop |
-| `revis status` | Show current progress |
-| `revis history <name>` | View iteration history table |
-| `revis show <name>` | Show session details |
+| `revis loop --name <name> --budget <budget>` | Start iteration loop |
+| `revis status` | Show current session progress |
+| `revis list` | List all sessions |
+| `revis show <name>` | Show session details and iteration history |
 | `revis compare <name> <i1> <i2>` | Compare two iterations |
 | `revis logs <name>` | View session logs |
-| `revis stop <name>` | Stop a running session |
+| `revis watch <name>` | Attach to running tmux session |
+| `revis stop` | Stop the running session |
 | `revis resume <name>` | Resume a stopped session |
 | `revis export <name>` | Export data as JSON/CSV |
 | `revis pr <name>` | Push branch and create GitHub PR |
