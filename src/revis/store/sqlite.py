@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from revis.types import (
@@ -169,7 +169,7 @@ class SQLiteRunStore:
             SET status = ?, termination_reason = ?, pr_url = ?, ended_at = ?
             WHERE id = ?
             """,
-            (status, reason.value, pr_url, datetime.now().isoformat(), session_id),
+            (status, reason.value, pr_url, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), session_id),
         )
         self.conn.commit()
 
@@ -236,7 +236,7 @@ class SQLiteRunStore:
     def mark_session_exported(self, session_id: str, pr_url: str | None) -> None:
         self.conn.execute(
             "UPDATE sessions SET exported_at = ?, pr_url = ? WHERE id = ?",
-            (datetime.now().isoformat(), pr_url, session_id),
+            (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), pr_url, session_id),
         )
         self.conn.commit()
 
@@ -281,6 +281,14 @@ class SQLiteRunStore:
         self.conn.execute(
             "UPDATE sessions SET retry_budget = ? WHERE id = ?",
             (retry_budget, session_id),
+        )
+        self.conn.commit()
+
+    def resume_session(self, session_id: str) -> None:
+        """Set session status back to running for resume."""
+        self.conn.execute(
+            "UPDATE sessions SET status = 'running', ended_at = NULL, termination_reason = NULL WHERE id = ?",
+            (session_id,),
         )
         self.conn.commit()
 
@@ -336,7 +344,7 @@ class SQLiteRunStore:
             INSERT INTO runs (id, session_id, iteration_number, config_json, status, started_at)
             VALUES (?, ?, ?, ?, 'running', ?)
             """,
-            (run_id, session_id, iteration, config_json, datetime.now().isoformat()),
+            (run_id, session_id, iteration, config_json, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
         )
         self.conn.commit()
         return run_id
@@ -344,7 +352,7 @@ class SQLiteRunStore:
     def set_run_status(self, run_id: str, status: str) -> None:
         updates = {"status": status}
         if status in ("completed", "failed"):
-            updates["ended_at"] = datetime.now().isoformat()
+            updates["ended_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
         self.conn.execute(

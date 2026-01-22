@@ -430,6 +430,36 @@ class RevisLoop:
                     logger.info(f"Target achieved: {primary_value} vs {self.config.metrics.target}")
                     return self._terminate(session, TerminationReason.TARGET_ACHIEVED, base_branch)
 
+            # Get previous eval for comparison (needed for outcome calculation)
+            prev_runs = self.store.query_runs(session_id=session.id, limit=2)
+            prev_eval = None
+            if len(prev_runs) > 1:
+                prev_metrics = self.store.get_run_metrics(prev_runs[1].id)
+                if prev_metrics:
+                    prev_eval_dict = {m.name: m.value for m in prev_metrics}
+                    prev_eval = EvalResult(metrics=prev_eval_dict)
+
+            # Analyze run and determine outcome
+            analysis = self.analyzer.analyze_run(session, eval_result, prev_eval)
+            outcome = None
+            if analysis.metric_delta is not None and primary_value is not None:
+                threshold = 0.01 * abs(primary_value) if primary_value != 0 else 0.001
+                if abs(analysis.metric_delta) < threshold:
+                    outcome = "plateau"
+                elif (self.config.metrics.minimize and analysis.metric_delta < 0) or (
+                    not self.config.metrics.minimize and analysis.metric_delta > 0
+                ):
+                    outcome = "improved"
+                else:
+                    outcome = "regressed"
+
+            # Store outcome before any termination checks
+            self.store.update_run_results(
+                run_id=run_id,
+                metrics_json=json.dumps(eval_result.metrics),
+                outcome=outcome or "improved",
+            )
+
             # Run guardrails
             metric_history = self.analyzer.get_metric_history(session.id)
             initial_value = metric_history[0] if metric_history else None
@@ -452,18 +482,6 @@ class RevisLoop:
                 if gr.guardrail == "plateau_detection" and gr.triggered:
                     logger.info("Plateau detected")
                     return self._terminate(session, TerminationReason.PLATEAU, base_branch)
-
-            # Get previous eval for comparison
-            prev_runs = self.store.query_runs(session_id=session.id, limit=2)
-            prev_eval = None
-            if len(prev_runs) > 1:
-                prev_metrics = self.store.get_run_metrics(prev_runs[1].id)
-                if prev_metrics:
-                    prev_eval_dict = {m.name: m.value for m in prev_metrics}
-                    prev_eval = EvalResult(metrics=prev_eval_dict)
-
-            # Analyze run
-            analysis = self.analyzer.analyze_run(session, eval_result, prev_eval)
 
             # Get run summaries for context
             run_summaries = self.analyzer.summarize_runs_for_context(
@@ -747,6 +765,9 @@ def resume_loop(
     """Resume a stopped session."""
     repo_path = Path.cwd()
     store = SQLiteRunStore(REVIS_DIR / "revis.db")
+
+    # Set session status back to running
+    store.resume_session(session.id)
 
     # Calculate remaining budget
     remaining = session.budget.remaining()

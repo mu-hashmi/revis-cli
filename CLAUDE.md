@@ -53,7 +53,6 @@ src/revis/
 ├── agents/          # Coding agent handoff
 │   ├── base.py      # CodingAgent protocol, HandoffContext
 │   ├── claude_code.py # Claude Code CLI integration
-│   ├── aider.py     # Aider CLI integration
 │   └── detect.py    # Auto-detect available agents
 │
 ├── llm/
@@ -101,7 +100,7 @@ The agent in `llm/agent.py` uses these tools defined in `llm/tools.py`:
 - `set_next_command`: Override CLI command for next training run
 - `request_code_change`: Request handoff to coding agent for code changes
 
-The LLM **cannot** write code directly. Code changes are handed off to external coding agents (Claude Code, Aider) or paused for manual intervention.
+The LLM **cannot** write code directly. Code changes are handed off to external coding agents (Claude Code) or paused for manual intervention.
 
 ### Coding Agent Handoff
 
@@ -135,7 +134,7 @@ Key sections:
 - `metrics.minimize`: Whether lower is better
 - `metrics.target`: Optional target value for early stopping
 - `guardrails`: plateau window, timeout, retry budget
-- `coding_agent.type`: `auto`, `claude-code`, `aider`, or `none`
+- `coding_agent.type`: `auto`, `claude-code`, or `none`
 - `context.deny`: File patterns agent cannot read
 
 ## CLI Commands

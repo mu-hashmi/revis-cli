@@ -6,6 +6,36 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+EXCLUDED_METRICS = {
+    "epoch",
+    "step",
+    "global_step",
+    "batch",
+    "iteration",
+    "learning_rate",
+    "lr",
+    "grad_norm",
+    "gradient_norm",
+    "samples_per_second",
+    "steps_per_second",
+    "samples_seen",
+    "tokens_seen",
+    "wall_time",
+    "timestamp",
+}
+
+
+def is_optimizable_metric(key: str) -> bool:
+    """Check if a metric is meaningful to optimize."""
+    key_lower = key.lower()
+    if key_lower in EXCLUDED_METRICS:
+        return False
+    if key_lower.endswith("_lr") or key_lower.endswith("_learning_rate"):
+        return False
+    if key_lower.startswith("lr_") or key_lower.startswith("learning_rate_"):
+        return False
+    return True
+
 
 class WandbMetricsSource:
     """Weights & Biases metrics source for init."""
@@ -71,7 +101,7 @@ class WandbMetricsSource:
             metric_keys = set()
             for run in runs:
                 for key in run.summary.keys():
-                    if not key.startswith("_"):
+                    if not key.startswith("_") and is_optimizable_metric(key):
                         metric_keys.add(key)
 
             return sorted(metric_keys)

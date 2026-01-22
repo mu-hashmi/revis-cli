@@ -122,7 +122,8 @@ def prompt_primary_metric(
     project: str | None,
 ) -> str:
     """Prompt for primary metric selection."""
-    metrics = source.list_metrics(project or "")
+    with console.status("[dim]Fetching metrics...[/dim]"):
+        metrics = source.list_metrics(project or "")
 
     if metrics:
         choices = [Choice(value=m, name=m) for m in metrics[:15]]

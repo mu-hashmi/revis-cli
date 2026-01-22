@@ -352,10 +352,48 @@ def loop(
 def resume(
     name: str = typer.Argument(..., help="Session name to resume"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
+    background: bool = typer.Option(False, "--background", "--bg", help="Run in background (tmux)"),
+    _in_tmux: bool = typer.Option(False, "--_in-tmux", hidden=True),
 ):
     """Resume a stopped session."""
-    setup_logging(verbose)
     store = get_store()
+
+    # Handle background mode first (before any other checks)
+    if background and not _in_tmux:
+        session = store.get_session_by_name(name)
+        if session is None:
+            console.print(f"[red]Error:[/red] Session '{name}' not found.")
+            raise typer.Exit(1)
+        if session.status == "running":
+            console.print(f"[red]Error:[/red] Session '{name}' is already running.")
+            raise typer.Exit(1)
+        if session.status == "completed":
+            console.print(f"[red]Error:[/red] Session '{name}' is already completed.")
+            raise typer.Exit(1)
+
+        cwd = str(Path.cwd())
+        tmux_name = f"revis-{name}"
+        cmd = f"revis resume {name} --_in-tmux"
+        if verbose:
+            cmd += " -v"
+
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, "-c", cwd, cmd],
+            check=True,
+        )
+
+        console.print("[green]Revis resume started in background[/green]")
+        console.print(f"  Session: {name}")
+        console.print(f"  Remaining budget: {session.budget.remaining()}")
+        console.print()
+        console.print("[bold]Commands:[/bold]")
+        console.print(f"  revis watch {name}    - attach to live output")
+        console.print(f"  revis logs {name}     - show recent output")
+        console.print("  revis status         - check session status")
+        console.print("  revis stop           - stop the loop")
+        return
+
+    setup_logging(verbose, session_name=name)
 
     session = store.get_session_by_name(name)
     if session is None:
@@ -608,41 +646,76 @@ def show(
     if not runs:
         return
 
+    # Load config for primary metric name
+    config_path = Path(CONFIG_FILE)
+    config = load_config(config_path) if config_path.exists() else None
+    primary_metric = config.metrics.primary if config else "loss"
+
     if trace:
         _show_traces(store, runs)
     else:
-        _show_runs_table(store, runs, session.iteration_count)
+        _show_runs_table(store, runs, session.iteration_count, primary_metric)
 
 
-def _show_runs_table(store, runs: list, iteration_count: int) -> None:
+def _show_runs_table(store, runs: list, iteration_count: int, primary_metric: str) -> None:
     """Show runs as a summary table."""
+    import json
+
     console.print(f"\n[bold]Iterations ({iteration_count}):[/bold]")
 
     table = Table()
     table.add_column("#", justify="right")
     table.add_column("Status")
-    table.add_column("Metrics")
     table.add_column("Change")
+    table.add_column("Hypothesis")
+    table.add_column(primary_metric, justify="right")
+    table.add_column("Outcome")
     table.add_column("Duration")
 
     for run in reversed(runs):
-        metrics = store.get_run_metrics(run.id)
-        metrics_str = ", ".join(f"{m.name}={m.value:.4f}" for m in metrics[:3])
-        if not metrics_str:
-            metrics_str = "N/A"
+        # Change column: actual config changes from change_description
+        change_str = run.change_description or "initial"
+        if run.change_type == "code_handoff":
+            change_str = f"[cyan][code][/cyan] {change_str}"
+        if len(change_str) > 40:
+            change_str = change_str[:37] + "..."
 
-        decisions = store.get_decisions(run.id)
-        if decisions:
-            rationale = decisions[0].rationale
-            change_str = rationale[:40] + "..." if len(rationale) > 40 else rationale
-        else:
-            change_str = "Initial"
+        # Hypothesis column: the rationale
+        hypothesis = run.hypothesis or "-"
+        if len(hypothesis) > 35:
+            hypothesis = hypothesis[:32] + "..."
 
+        # Primary metric value
+        metric_value = "-"
+        if run.metrics_json:
+            try:
+                metrics = json.loads(run.metrics_json)
+                if primary_metric in metrics:
+                    metric_value = f"{metrics[primary_metric]:.4f}"
+            except json.JSONDecodeError:
+                pass
+        if metric_value == "-":
+            db_metrics = store.get_run_metrics(run.id)
+            for m in db_metrics:
+                if m.name == primary_metric:
+                    metric_value = f"{m.value:.4f}"
+                    break
+
+        # Outcome with styling
+        outcome = run.outcome or "-"
+        outcome_style = {
+            "improved": "green",
+            "regressed": "red",
+            "plateau": "yellow",
+            "failed": "red",
+        }.get(outcome, "white")
+
+        # Duration - fix bug by checking status instead of just started_at
         duration_str = ""
         if run.started_at and run.ended_at:
             secs = (run.ended_at - run.started_at).total_seconds()
             duration_str = format_duration(int(secs))
-        elif run.started_at:
+        elif run.status == "running":
             duration_str = "running..."
 
         status_style = {"completed": "green", "failed": "red", "running": "yellow"}.get(
@@ -652,8 +725,10 @@ def _show_runs_table(store, runs: list, iteration_count: int) -> None:
         table.add_row(
             str(run.iteration_number),
             f"[{status_style}]{run.status}[/{status_style}]",
-            metrics_str,
             change_str,
+            hypothesis,
+            metric_value,
+            f"[{outcome_style}]{outcome}[/{outcome_style}]",
             duration_str,
         )
 
@@ -903,82 +978,6 @@ def format_duration(seconds: int) -> str:
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
         return f"{hours}h {minutes}m"
-
-
-@app.command()
-def history(
-    name: str = typer.Argument(..., help="Session name"),
-):
-    """Show iteration history for a session."""
-    import json
-
-    store = get_store()
-    config_path = Path(CONFIG_FILE)
-    config = load_config(config_path) if config_path.exists() else None
-
-    session = store.get_session_by_name(name)
-    if session is None:
-        console.print(f"[red]Error:[/red] Session '{name}' not found.")
-        raise typer.Exit(1)
-
-    runs = store.query_runs(session_id=session.id, limit=100)
-    runs = list(reversed(runs))
-
-    if not runs:
-        console.print("No iterations found.")
-        return
-
-    primary_metric = config.metrics.primary if config else "loss"
-
-    table = Table(title=f"Session: {name}")
-    table.add_column("#", justify="right", style="dim")
-    table.add_column("Change")
-    table.add_column("Hypothesis")
-    table.add_column("Outcome")
-    table.add_column(primary_metric, justify="right")
-
-    for run in runs:
-        change_desc = run.change_description or "initial"
-        if run.change_type == "code_handoff":
-            change_desc = f"[cyan][code][/cyan] {change_desc}"
-
-        hypothesis = run.hypothesis or "-"
-        if len(hypothesis) > 35:
-            hypothesis = hypothesis[:32] + "..."
-
-        outcome = run.outcome or "-"
-        outcome_style = {
-            "improved": "green",
-            "regressed": "red",
-            "plateau": "yellow",
-            "failed": "red",
-        }.get(outcome, "white")
-
-        metric_value = "-"
-        if run.metrics_json:
-            try:
-                metrics = json.loads(run.metrics_json)
-                if primary_metric in metrics:
-                    metric_value = f"{metrics[primary_metric]:.4f}"
-            except json.JSONDecodeError:
-                pass
-
-        if metric_value == "-":
-            db_metrics = store.get_run_metrics(run.id)
-            for m in db_metrics:
-                if m.name == primary_metric:
-                    metric_value = f"{m.value:.4f}"
-                    break
-
-        table.add_row(
-            str(run.iteration_number),
-            change_desc[:40],
-            hypothesis,
-            f"[{outcome_style}]{outcome}[/{outcome_style}]",
-            metric_value,
-        )
-
-    console.print(table)
 
 
 @app.command()
