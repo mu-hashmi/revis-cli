@@ -202,9 +202,9 @@ context:
     - "wandb/**"
     - ".revis/**"
     - "revis.yaml"
-  # constraints: []  # Natural language constraints for the LLM, e.g.:
-  #   - "Learning rate must be between 1e-6 and 1e-2"
-  #   - "Batch size must be a power of 2"
+  constraints:  # Natural language constraints for the LLM
+    # - "Learning rate must be between 1e-6 and 1e-2"
+    # - "Batch size must be a power of 2"
   history: 10
   log_tail_lines: 200
   max_agent_iterations: 20
@@ -311,9 +311,9 @@ def generate_config_yaml(
     lines.append('    - "wandb/**"')
     lines.append('    - ".revis/**"')
     lines.append('    - "revis.yaml"')
-    lines.append("  # constraints: []  # Natural language constraints for the LLM, e.g.:")
-    lines.append('  #   - "Learning rate must be between 1e-6 and 1e-2"')
-    lines.append('  #   - "Batch size must be a power of 2"')
+    lines.append("  constraints:  # Natural language constraints for the LLM")
+    lines.append('    # - "Learning rate must be between 1e-6 and 1e-2"')
+    lines.append('    # - "Batch size must be a power of 2"')
     lines.append("  history: 10")
     lines.append("  log_tail_lines: 200")
     lines.append("  max_agent_iterations: 20")
