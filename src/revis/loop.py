@@ -254,9 +254,10 @@ class RevisLoop:
             self.store.increment_iteration(session.id)
             logger.info(f"Starting iteration {iteration}")
 
-            # Sync code to remote
-            logger.info("Syncing code to remote...")
-            self.executor.sync_code(self.repo_path, self.config.executor.work_dir)
+            # Sync code to remote (only for SSH executor)
+            if self.config.executor.type == "ssh":
+                logger.info("Syncing code to remote...")
+                self.executor.sync_code(self.repo_path, self.config.executor.work_dir)
 
             # Create run record
             run_id = self.store.create_run(

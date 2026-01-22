@@ -187,13 +187,13 @@ metrics:
   # target: 0.1  # Optional early stopping target
 
 guardrails:
-  plateau_threshold: 0.01
-  plateau_runs: 3
-  max_run_duration: 24h
-  retry_budget: 3
+  plateau_threshold: 0.01  # Min improvement required (0.01 = 1%)
+  plateau_runs: 3  # Runs without improvement before stopping
+  max_run_duration: 24h  # Max time per run (s/m/h/d)
+  retry_budget: 3  # Retries after failures
 
 context:
-  deny:
+  deny:  # Files/patterns hidden from the LLM
     - ".git/**"
     - "**/__pycache__/**"
     - "*.pt"
@@ -202,12 +202,12 @@ context:
     - "wandb/**"
     - ".revis/**"
     - "revis.yaml"
-  constraints:  # Natural language constraints for the LLM
+  constraints:  # Rules the LLM must follow
     # - "Learning rate must be between 1e-6 and 1e-2"
     # - "Batch size must be a power of 2"
-  history: 10
-  log_tail_lines: 200
-  max_agent_iterations: 20
+  history: 10  # Past runs to include in LLM context
+  log_tail_lines: 200  # Lines of training output to show
+  max_agent_iterations: 20  # Max LLM tool calls per iteration
 
 llm:
   # Uncomment one of the models below (requires corresponding API key in env)
@@ -232,8 +232,8 @@ llm:
 
 coding_agent:
   type: auto  # auto, claude-code, or none
-  auto_handoff: true  # false = pause and ask before handing off
-  verify: true  # run smoke test after code changes
+  auto_handoff: true  # false = ask before code changes
+  verify: true  # Run smoke test after changes
 
 artifacts:
   path: .revis/artifacts
@@ -258,6 +258,7 @@ def generate_config_yaml(
     ssh_port: int = 22,
     ssh_key_path: str | None = None,
     coding_agent_type: str = "auto",
+    extra_deny_patterns: list[str] | None = None,
 ) -> str:
     """Generate revis.yaml content from interactive init results."""
     lines = ["# Revis Configuration", ""]
@@ -294,15 +295,15 @@ def generate_config_yaml(
 
     # Guardrails
     lines.append("guardrails:")
-    lines.append("  plateau_threshold: 0.01")
-    lines.append("  plateau_runs: 3")
-    lines.append("  max_run_duration: 24h")
-    lines.append("  retry_budget: 3")
+    lines.append("  plateau_threshold: 0.01  # Min improvement required (0.01 = 1%)")
+    lines.append("  plateau_runs: 3  # Runs without improvement before stopping")
+    lines.append("  max_run_duration: 24h  # Max time per run (s/m/h/d)")
+    lines.append("  retry_budget: 3  # Retries after failures")
     lines.append("")
 
     # Context
     lines.append("context:")
-    lines.append("  deny:")
+    lines.append("  deny:  # Files/patterns hidden from the LLM")
     lines.append('    - ".git/**"')
     lines.append('    - "**/__pycache__/**"')
     lines.append('    - "*.pt"')
@@ -311,12 +312,15 @@ def generate_config_yaml(
     lines.append('    - "wandb/**"')
     lines.append('    - ".revis/**"')
     lines.append('    - "revis.yaml"')
-    lines.append("  constraints:  # Natural language constraints for the LLM")
+    if extra_deny_patterns:
+        for pattern in extra_deny_patterns:
+            lines.append(f'    - "{pattern}"')
+    lines.append("  constraints:  # Rules the LLM must follow")
     lines.append('    # - "Learning rate must be between 1e-6 and 1e-2"')
     lines.append('    # - "Batch size must be a power of 2"')
-    lines.append("  history: 10")
-    lines.append("  log_tail_lines: 200")
-    lines.append("  max_agent_iterations: 20")
+    lines.append("  history: 10  # Past runs to include in LLM context")
+    lines.append("  log_tail_lines: 200  # Lines of training output to show")
+    lines.append("  max_agent_iterations: 20  # Max LLM tool calls per iteration")
     lines.append("")
 
     # LLM
@@ -344,9 +348,9 @@ def generate_config_yaml(
 
     # Coding agent
     lines.append("coding_agent:")
-    lines.append(f"  type: {coding_agent_type}")
-    lines.append("  auto_handoff: true")
-    lines.append("  verify: true")
+    lines.append(f"  type: {coding_agent_type}  # auto, claude-code, or none")
+    lines.append("  auto_handoff: true  # false = ask before code changes")
+    lines.append("  verify: true  # Run smoke test after changes")
     lines.append("")
 
     # Artifacts

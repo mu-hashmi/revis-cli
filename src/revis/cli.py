@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import typer
+import typer.rich_utils
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
@@ -15,6 +16,15 @@ from rich.table import Table
 from revis.config import get_config_template, load_config, parse_duration
 from revis.store.sqlite import SQLiteRunStore
 from revis.types import Budget
+
+# Override Typer's default "dim" styles which render as dark purple on some terminals
+typer.rich_utils.STYLE_HELPTEXT = ""
+typer.rich_utils.STYLE_OPTION_DEFAULT = "bright_black"
+typer.rich_utils.STYLE_OPTION_ENVVAR = "yellow"
+typer.rich_utils.STYLE_ERRORS_SUGGESTION = ""
+typer.rich_utils.STYLE_METAVAR_SEPARATOR = ""
+typer.rich_utils.STYLE_OPTIONS_PANEL_BORDER = "bright_black"
+typer.rich_utils.STYLE_COMMANDS_PANEL_BORDER = "bright_black"
 
 app = typer.Typer(help="Revis - Autonomous ML iteration engine")
 console = Console()
@@ -123,6 +133,7 @@ def init():
             ssh_port=init_config.ssh_port,
             ssh_key_path=init_config.ssh_key_path,
             coding_agent_type=init_config.coding_agent_type,
+            extra_deny_patterns=init_config.extra_deny_patterns,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled.[/yellow]")
@@ -147,8 +158,9 @@ def init():
         gitignore.write_text(f"# Revis\n{REVIS_DIR}/\n")
         console.print(f"Created .gitignore with {REVIS_DIR}/")
 
-    console.print("\n[green]Created revis.yaml[/green]")
-    console.print("Run 'revis loop --name experiment-1 --budget 4h' to start.")
+    console.print("\n[green]Revis initialized![/green]")
+    console.print("You can edit revis.yaml to adjust settings at any time.")
+    console.print("\nRun 'revis loop --name experiment-1 --budget 4h' to start.")
 
 
 @app.command()

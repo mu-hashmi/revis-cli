@@ -1,7 +1,8 @@
 """Interactive prompts for revis init using InquirerPy."""
 
+import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
@@ -35,6 +36,8 @@ class InitConfig:
 
     coding_agent_type: str = "auto"
 
+    extra_deny_patterns: list[str] = field(default_factory=list)
+
 
 def detect_coding_agent() -> str | None:
     """Detect available coding agents."""
@@ -61,7 +64,9 @@ def prompt_metrics_source() -> tuple[str, WandbMetricsSource | EvalJsonMetricsSo
     if wandb_available:
         choices.append(Choice(value="wandb", name="Weights & Biases"))
     else:
-        choices.append(Choice(value="wandb_disabled", name="Weights & Biases (no auth detected)"))
+        choices.append(
+            Choice(value="wandb_disabled", name="Weights & Biases (requires: wandb login)")
+        )
 
     choices.append(Choice(value="eval_json", name="eval.json (manual)"))
 
@@ -72,7 +77,8 @@ def prompt_metrics_source() -> tuple[str, WandbMetricsSource | EvalJsonMetricsSo
     ).execute()
 
     if source_type == "wandb_disabled":
-        console.print("[yellow]Install wandb and run 'wandb login' to enable W&B[/yellow]")
+        console.print("[yellow]Run 'wandb login' first, then re-run 'revis init'[/yellow]")
+        console.print("[dim]See: https://github.com/mu-hashmi/revis-cli#evaljson-manual[/dim]")
         return "eval_json", EvalJsonMetricsSource()
 
     if source_type == "wandb":
@@ -84,8 +90,11 @@ def prompt_metrics_source() -> tuple[str, WandbMetricsSource | EvalJsonMetricsSo
         else:
             console.print("[red]failed[/red]")
             console.print("[yellow]Falling back to eval.json[/yellow]")
+            console.print("[dim]See: https://github.com/mu-hashmi/revis-cli#evaljson-manual[/dim]")
             return "eval_json", EvalJsonMetricsSource()
 
+    # eval_json selected directly
+    console.print("[dim]See: https://github.com/mu-hashmi/revis-cli#evaljson-manual[/dim]")
     return "eval_json", EvalJsonMetricsSource()
 
 
@@ -233,6 +242,114 @@ def prompt_coding_agent() -> str:
     ).execute()
 
 
+def prompt_context_deny() -> list[str]:
+    """Prompt for additional files to hide from the LLM."""
+    hide_files = inquirer.select(
+        message="The LLM can read your repo. Hide any files?",
+        choices=[
+            Choice(value=False, name="No, allow full access (recommended)"),
+            Choice(value=True, name="Yes, select files to hide"),
+        ],
+        default=False,
+    ).execute()
+
+    if not hide_files:
+        return []
+
+    selected_patterns: list[str] = []
+    current_path = "."
+
+    while True:
+        # Build choices for current directory
+        choices = []
+
+        # Add back option if not at root
+        if current_path != ".":
+            choices.append(Choice(value="__back__", name="← Back"))
+
+        # Add done option
+        choices.append(
+            Choice(value="__done__", name=f"✓ Done ({len(selected_patterns)} selected)")
+        )
+
+        # List entries in current directory
+        try:
+            entries = sorted(os.listdir(current_path))
+        except OSError:
+            entries = []
+
+        dirs = []
+        files = []
+        for entry in entries:
+            if entry.startswith("."):
+                continue
+            full_path = os.path.join(current_path, entry)
+            rel_path = full_path[2:] if full_path.startswith("./") else full_path
+            if os.path.isdir(full_path):
+                dirs.append((entry, rel_path))
+            else:
+                files.append((entry, rel_path))
+
+        # Add directories first (navigable)
+        for name, rel_path in dirs:
+            pattern = f"{rel_path}/**"
+            if pattern in selected_patterns:
+                choices.append(Choice(value=f"__dir__:{rel_path}", name=f"[x] {name}/"))
+            else:
+                choices.append(Choice(value=f"__dir__:{rel_path}", name=f"[ ] {name}/"))
+
+        # Add files
+        for name, rel_path in files:
+            if rel_path in selected_patterns:
+                choices.append(Choice(value=f"__file__:{rel_path}", name=f"[x] {name}"))
+            else:
+                choices.append(Choice(value=f"__file__:{rel_path}", name=f"[ ] {name}"))
+
+        if len(choices) <= 2:  # Only back and done
+            console.print("[dim]No files in this directory.[/dim]")
+            if current_path == ".":
+                return selected_patterns
+            current_path = os.path.dirname(current_path) or "."
+            continue
+
+        # Show current path
+        display_path = current_path if current_path != "." else "(root)"
+        result = inquirer.select(
+            message=f"Hide files [{display_path}]:",
+            choices=choices,
+        ).execute()
+
+        if result == "__done__":
+            return selected_patterns
+        elif result == "__back__":
+            current_path = os.path.dirname(current_path) or "."
+        elif result.startswith("__dir__:"):
+            rel_path = result[8:]
+            pattern = f"{rel_path}/**"
+            # Show submenu for directory
+            dir_action = inquirer.select(
+                message=f"Directory: {rel_path}/",
+                choices=[
+                    Choice(value="toggle", name="Toggle hide entire directory"),
+                    Choice(value="enter", name="Browse contents"),
+                    Choice(value="cancel", name="Cancel"),
+                ],
+            ).execute()
+            if dir_action == "toggle":
+                if pattern in selected_patterns:
+                    selected_patterns.remove(pattern)
+                else:
+                    selected_patterns.append(pattern)
+            elif dir_action == "enter":
+                current_path = rel_path
+        elif result.startswith("__file__:"):
+            rel_path = result[9:]
+            if rel_path in selected_patterns:
+                selected_patterns.remove(rel_path)
+            else:
+                selected_patterns.append(rel_path)
+
+
 def run_interactive_init() -> InitConfig:
     """Run the full interactive init flow."""
     config = InitConfig()
@@ -267,6 +384,9 @@ def run_interactive_init() -> InitConfig:
     console.print()
 
     config.coding_agent_type = prompt_coding_agent()
+    console.print()
+
+    config.extra_deny_patterns = prompt_context_deny()
     console.print()
 
     return config
