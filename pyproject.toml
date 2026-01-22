@@ -3,7 +3,28 @@ name = "revis"
 version = "0.1.5"
 description = "Autonomous ML iteration engine"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
+authors = [
+    { name = "Muhammad Hashmi" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["machine-learning", "automation", "training", "llm", "ml-ops"]
+
+[project.urls]
+Homepage = "https://github.com/mu-hashmi/revis-cli"
+Repository = "https://github.com/mu-hashmi/revis-cli"
+Issues = "https://github.com/mu-hashmi/revis-cli/issues"
+
 dependencies = [
     "typer>=0.9.0",
     "rich>=13.0",
